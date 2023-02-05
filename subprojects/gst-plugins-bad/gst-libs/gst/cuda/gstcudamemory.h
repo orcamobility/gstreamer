@@ -157,6 +157,16 @@ GstMemory    * gst_cuda_allocator_alloc    (GstCudaAllocator * allocator,
                                             GstCudaContext * context,
                                             const GstVideoInfo * info);
 
+GST_CUDA_API
+gpointer        gst_cuda_memory_get_user_data (GstCudaMemory * mem);
+
+GST_CUDA_API
+GstMemory *     gst_cuda_allocator_alloc_wrapped (GstCudaAllocator * allocator,
+                                                  GstCudaContext * context,
+                                                  const GstVideoInfo * info,
+                                                  CUdeviceptr dev_ptr,
+                                                  gpointer user_data,
+                                                  GDestroyNotify notify);
 G_END_DECLS
 
 #endif /* __GST_CUDA_MEMORY_H__ */

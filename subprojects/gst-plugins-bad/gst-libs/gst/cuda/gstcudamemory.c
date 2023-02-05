@@ -42,6 +42,9 @@ struct _GstCudaMemoryPrivate
   guint height;
 
   GMutex lock;
+
+  gpointer user_data;
+  GDestroyNotify notify;
 };
 
 #define gst_cuda_allocator_parent_class parent_class
@@ -221,8 +224,12 @@ gst_cuda_allocator_free (GstAllocator * allocator, GstMemory * memory)
   GstCudaMemoryPrivate *priv = mem->priv;
 
   gst_cuda_context_push (mem->context);
-  if (priv->data)
+
+  if (priv->notify) {
+    priv->notify (priv->user_data);
+  } else if (priv->data) {
     gst_cuda_result (CuMemFree (priv->data));
+  }
 
   if (priv->staging)
     gst_cuda_result (CuMemFreeHost (priv->staging));
@@ -553,4 +560,85 @@ gst_cuda_allocator_alloc (GstCudaAllocator * allocator,
 
   return gst_cuda_allocator_alloc_internal (allocator, context,
       info, info->stride[0], alloc_height);
+}
+
+/**
+ * gst_cuda_memory_get_user_data:
+ * @mem: A #GstCudaMemory
+ *
+ * Gets user data pointer stored via gst_cuda_allocator_alloc_wrapped()
+ *
+ * Returns: (transfer none) (nullable): the user data pointer
+ *
+ * Since: 1.24
+ */
+gpointer
+gst_cuda_memory_get_user_data (GstCudaMemory * mem)
+{
+  g_return_val_if_fail (gst_is_cuda_memory ((GstMemory *) mem), NULL);
+
+  return mem->priv->user_data;
+}
+
+/**
+ * gst_cuda_allocator_alloc_wrapped:
+ * @allocator: (transfer none) (allow-none): a #GstCudaAllocator
+ * @context: (transfer none): a #GstCudaContext
+ * @stream: (transfer none) (allow-none): a #GstCudaStream
+ * @info: a #GstVideoInfo
+ * @dev_ptr: a CUdeviceptr CUDA device memory
+ * @user_data: (allow-none): user data
+ * @notify: (allow-none) (scope async) (closure user_data):
+ *   Called with @user_data when the memory is freed
+ *
+ * Allocates a new memory that wraps the given CUDA device memory.
+ *
+ * @info must represent actual memory layout, in other words, offset, stride
+ * and size fields of @info should be matched with memory layout of @dev_ptr
+ *
+ * By default, wrapped @dev_ptr will be freed at the time when #GstMemory
+ * is freed if @notify is %NULL. Otherwise, if caller sets @notify,
+ * freeing @dev_ptr is callers responsibility and default #GstCudaAllocator
+ * will not free it.
+ *
+ * Returns: (transfer full): a new #GstMemory
+ *
+ * Since: 1.24
+ */
+GstMemory *
+gst_cuda_allocator_alloc_wrapped (GstCudaAllocator * allocator,
+    GstCudaContext * context, const GstVideoInfo * info,
+    CUdeviceptr dev_ptr, gpointer user_data, GDestroyNotify notify)
+{
+  GstCudaMemory *mem;
+  GstCudaMemoryPrivate *priv;
+
+  gst_cuda_memory_init_once ();
+
+  if (!allocator)
+    allocator = (GstCudaAllocator *) _gst_cuda_allocator;
+
+  g_return_val_if_fail (GST_IS_CUDA_ALLOCATOR (allocator), NULL);
+  g_return_val_if_fail (GST_IS_CUDA_CONTEXT (context), NULL);
+  g_return_val_if_fail (info, NULL);
+  g_return_val_if_fail (dev_ptr, NULL);
+
+  mem = g_new0 (GstCudaMemory, 1);
+  mem->priv = priv = g_new0 (GstCudaMemoryPrivate, 1);
+
+  priv->data = dev_ptr;
+  priv->pitch = info->stride[0];
+  priv->width_in_bytes = GST_VIDEO_INFO_COMP_WIDTH (info, 0) *
+      GST_VIDEO_INFO_COMP_PSTRIDE (info, 0);
+  priv->height = info->size / priv->pitch;
+  priv->user_data = user_data;
+  priv->notify = notify;
+
+  mem->context = (GstCudaContext *) gst_object_ref (context);
+  mem->info = *info;
+
+  gst_memory_init (GST_MEMORY_CAST (mem), (GstMemoryFlags) 0,
+      GST_ALLOCATOR_CAST (allocator), NULL, info->size, 0, 0, info->size);
+
+  return GST_MEMORY_CAST (mem);
 }
