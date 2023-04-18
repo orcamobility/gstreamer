@@ -49,6 +49,8 @@
 #endif
 #include "gstnvh264encoder.h"
 #include "gstnvh265encoder.h"
+#include "gstcudaipcsink.h"
+#include "gstcudaipcsrc.h"
 
 GST_DEBUG_CATEGORY (gst_nvcodec_debug);
 GST_DEBUG_CATEGORY (gst_nvdec_debug);
@@ -306,8 +308,12 @@ plugin_init (GstPlugin * plugin)
   }
 
   gst_cuda_memory_copy_register (plugin, GST_RANK_NONE);
-
   gst_cuda_filter_plugin_init (plugin);
+  gst_element_register (plugin,
+      "cudaipcsink", GST_RANK_NONE, GST_TYPE_CUDA_IPC_SINK);
+  gst_element_register (plugin,
+      "cudaipcsrc", GST_RANK_NONE, GST_TYPE_CUDA_IPC_SRC);
+
   gst_cuda_memory_init_once ();
 
 #ifdef HAVE_NVCODEC_NVMM

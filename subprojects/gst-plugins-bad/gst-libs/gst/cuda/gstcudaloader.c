@@ -123,6 +123,22 @@ typedef struct _GstNvCodecCudaVTable
       CUdevice * pCudaDevices, unsigned int cudaDeviceCount,
       CUGLDeviceList deviceList);
 
+  CUresult (CUDAAPI * CuEventCreate) (CUevent *phEvent, unsigned int Flags);
+  CUresult (CUDAAPI * CuEventDestroy) (CUevent hEvent);
+  CUresult (CUDAAPI * CuEventRecord) (CUevent hEvent, CUstream hStream);
+  CUresult (CUDAAPI * CuEventSynchronize) (CUevent hEvent);
+
+  CUresult (CUDAAPI * CuIpcGetEventHandle) (CUipcEventHandle *pHandle,
+      CUevent event);
+  CUresult (CUDAAPI * CuIpcOpenEventHandle) (CUevent* phEvent,
+      CUipcEventHandle handle);
+
+  CUresult (CUDAAPI * CuIpcGetMemHandle) (CUipcMemHandle *pHandle,
+      CUdeviceptr dptr);
+  CUresult (CUDAAPI * CuIpcOpenMemHandle) (CUdeviceptr *pdptr,
+      CUipcMemHandle handle, unsigned int Flags);
+  CUresult (CUDAAPI * CuIpcCloseMemHandle) (CUdeviceptr dptr);
+
 #ifdef G_OS_WIN32
   CUresult (CUDAAPI * CuGraphicsD3D11RegisterResource) (CUgraphicsResource *
       pCudaResource, ID3D11Resource * pD3DResource, unsigned int Flags);
@@ -219,6 +235,18 @@ gst_cuda_load_library (void)
   LOAD_SYMBOL (cuTexObjectCreate, CuTexObjectCreate);
   LOAD_SYMBOL (cuTexObjectDestroy, CuTexObjectDestroy);
   LOAD_SYMBOL (cuLaunchKernel, CuLaunchKernel);
+
+  LOAD_SYMBOL (cuEventCreate, CuEventCreate);
+  LOAD_SYMBOL (cuEventDestroy, CuEventDestroy);
+  LOAD_SYMBOL (cuEventRecord, CuEventRecord);
+  LOAD_SYMBOL (cuEventSynchronize, CuEventSynchronize);
+
+  LOAD_SYMBOL (cuIpcGetEventHandle, CuIpcGetEventHandle);
+  LOAD_SYMBOL (cuIpcOpenEventHandle, CuIpcOpenEventHandle);
+
+  LOAD_SYMBOL (cuIpcGetMemHandle, CuIpcGetMemHandle);
+  LOAD_SYMBOL (cuIpcOpenMemHandle, CuIpcOpenMemHandle);
+  LOAD_SYMBOL (cuIpcCloseMemHandle, CuIpcCloseMemHandle);
 
   /* cudaGL.h */
   LOAD_SYMBOL (cuGraphicsGLRegisterImage, CuGraphicsGLRegisterImage);
@@ -558,6 +586,79 @@ CuLaunchKernel (CUfunction f, unsigned int gridDimX,
   return gst_cuda_vtable.CuLaunchKernel (f, gridDimX, gridDimY, gridDimZ,
       blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams,
       extra);
+}
+
+CUresult CUDAAPI
+CuEventCreate (CUevent * phEvent, unsigned int Flags)
+{
+  g_assert (gst_cuda_vtable.CuEventCreate);
+
+  return gst_cuda_vtable.CuEventCreate (phEvent, Flags);
+}
+
+CUresult CUDAAPI
+CuEventDestroy (CUevent hEvent)
+{
+  g_assert (gst_cuda_vtable.CuEventDestroy);
+
+  return gst_cuda_vtable.CuEventDestroy (hEvent);
+}
+
+CUresult CUDAAPI
+CuEventRecord (CUevent hEvent, CUstream hStream)
+{
+  g_assert (gst_cuda_vtable.CuEventRecord);
+
+  return gst_cuda_vtable.CuEventRecord (hEvent, hStream);
+}
+
+CUresult CUDAAPI
+CuEventSynchronize (CUevent hEvent)
+{
+  g_assert (gst_cuda_vtable.CuEventSynchronize);
+
+  return gst_cuda_vtable.CuEventSynchronize (hEvent);
+}
+
+CUresult CUDAAPI
+CuIpcGetEventHandle (CUipcEventHandle * pHandle, CUevent event)
+{
+  g_assert (gst_cuda_vtable.CuIpcGetEventHandle);
+
+  return gst_cuda_vtable.CuIpcGetEventHandle (pHandle, event);
+}
+
+CUresult CUDAAPI
+CuIpcOpenEventHandle (CUevent * phEvent, CUipcEventHandle handle)
+{
+  g_assert (gst_cuda_vtable.CuIpcOpenEventHandle);
+
+  return gst_cuda_vtable.CuIpcOpenEventHandle (phEvent, handle);
+}
+
+CUresult CUDAAPI
+CuIpcGetMemHandle (CUipcMemHandle * pHandle, CUdeviceptr dptr)
+{
+  g_assert (gst_cuda_vtable.CuIpcGetMemHandle);
+
+  return gst_cuda_vtable.CuIpcGetMemHandle (pHandle, dptr);
+}
+
+CUresult CUDAAPI
+CuIpcOpenMemHandle (CUdeviceptr * pdptr, CUipcMemHandle handle,
+    unsigned int Flags)
+{
+  g_assert (gst_cuda_vtable.CuIpcOpenMemHandle);
+
+  return gst_cuda_vtable.CuIpcOpenMemHandle (pdptr, handle, Flags);
+}
+
+CUresult CUDAAPI
+CuIpcCloseMemHandle (CUdeviceptr dptr)
+{
+  g_assert (gst_cuda_vtable.CuIpcCloseMemHandle);
+
+  return gst_cuda_vtable.CuIpcCloseMemHandle (dptr);
 }
 
 /* cudaGL.h */

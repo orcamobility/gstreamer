@@ -30,6 +30,7 @@ typedef gpointer CUarray;
 typedef gpointer CUmodule;
 typedef gpointer CUfunction;
 typedef gpointer CUmipmappedArray;
+typedef gpointer CUevent;
 
 typedef guint64  CUtexObject;
 typedef guintptr CUdeviceptr;
@@ -38,6 +39,7 @@ typedef gint CUdevice;
 typedef enum
 {
   CUDA_SUCCESS = 0,
+  CUDA_ERROR_ALREADY_MAPPED = 208,
 } CUresult;
 
 typedef enum
@@ -51,6 +53,7 @@ typedef enum
 typedef enum
 {
   CU_DEVICE_ATTRIBUTE_TEXTURE_ALIGNMENT = 14,
+  CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING = 41,
   CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75,
   CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76,
 } CUdevice_attribute;
@@ -109,6 +112,14 @@ typedef enum
 {
   CU_RES_VIEW_FORMAT_NONE = 0,
 } CUresourceViewFormat;
+
+typedef enum
+{
+  CU_EVENT_DEFAULT = 0x0,
+  CU_EVENT_BLOCKING_SYNC = 0x1,
+  CU_EVENT_DISABLE_TIMING = 0x2,
+  CU_EVENT_INTERPROCESS = 0x4,
+} CUevent_flags;
 
 typedef struct
 {
@@ -192,6 +203,22 @@ typedef struct
   guint reserved[16];
 } CUDA_RESOURCE_VIEW_DESC;
 
+typedef enum
+{
+  CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS = 0x1
+} CUipcMem_flags;
+
+#define CU_IPC_HANDLE_SIZE 64
+typedef struct
+{
+  char reserved[CU_IPC_HANDLE_SIZE];
+} CUipcMemHandle;
+
+typedef struct
+{
+  char reserved[CU_IPC_HANDLE_SIZE];
+} CUipcEventHandle;
+
 #define CUDA_VERSION 10000
 
 #ifdef _WIN32
@@ -213,6 +240,8 @@ typedef struct
 #define cuMemcpy2D cuMemcpy2D_v2
 #define cuMemcpy2DAsync cuMemcpy2DAsync_v2
 #define cuMemFree cuMemFree_v2
+
+#define cuEventDestroy cuEventDestroy_v2
 
 #define CU_TRSF_READ_AS_INTEGER 1
 

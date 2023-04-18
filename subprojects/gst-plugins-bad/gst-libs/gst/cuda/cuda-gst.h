@@ -169,6 +169,40 @@ CUresult CUDAAPI CuLaunchKernel       (CUfunction f,
                                        void **kernelParams,
                                        void **extra);
 
+GST_CUDA_API
+CUresult CUDAAPI CuEventCreate       (CUevent *phEvent,
+                                      unsigned int Flags);
+
+GST_CUDA_API
+CUresult CUDAAPI CuEventDestroy      (CUevent hEvent);
+
+GST_CUDA_API
+CUresult CUDAAPI CuEventRecord       (CUevent hEvent,
+                                      CUstream hStream);
+
+GST_CUDA_API
+CUresult CUDAAPI CuEventSynchronize  (CUevent hEvent);
+
+GST_CUDA_API
+CUresult CUDAAPI CuIpcGetEventHandle (CUipcEventHandle *pHandle,
+                                      CUevent event);
+
+GST_CUDA_API
+CUresult CUDAAPI CuIpcOpenEventHandle (CUevent* phEvent,
+                                       CUipcEventHandle handle);
+
+GST_CUDA_API
+CUresult CUDAAPI CuIpcGetMemHandle   (CUipcMemHandle *pHandle,
+                                      CUdeviceptr dptr);
+
+GST_CUDA_API
+CUresult CUDAAPI CuIpcOpenMemHandle  (CUdeviceptr *pdptr,
+                                      CUipcMemHandle handle,
+                                      unsigned int Flags);
+
+GST_CUDA_API
+CUresult CUDAAPI CuIpcCloseMemHandle (CUdeviceptr dptr);
+
 /* cudaGL.h */
 GST_CUDA_API
 CUresult CUDAAPI CuGraphicsGLRegisterImage  (CUgraphicsResource * pCudaResource,
