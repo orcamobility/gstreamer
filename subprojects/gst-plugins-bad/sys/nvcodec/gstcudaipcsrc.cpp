@@ -81,7 +81,7 @@ enum
 struct GstCudaIpcSrcPrivate
 {
   GstCudaContext *context = nullptr;
-  GstCudaStream *stream = nullptr;
+  CUstream stream = nullptr;
 
   GstCudaIpcClient *client = nullptr;
   GstCaps *caps = nullptr;
@@ -333,7 +333,10 @@ gst_cuda_ipc_src_start (GstBaseSrc * src)
     return FALSE;
   }
 
-  priv->stream = gst_cuda_stream_new (priv->context);
+  if (gst_cuda_context_push (priv->context)) {
+    CuStreamCreate (&priv->stream, CU_STREAM_DEFAULT);
+    gst_cuda_context_pop (nullptr);
+  }
 
   std::lock_guard < std::mutex > lk (priv->lock);
   priv->client = gst_cuda_ipc_client_new (priv->address.c_str (), priv->context,
@@ -356,7 +359,14 @@ gst_cuda_ipc_src_stop (GstBaseSrc * src)
     gst_cuda_ipc_client_stop (priv->client);
 
   gst_clear_object (&priv->client);
-  gst_clear_cuda_stream (&priv->stream);
+
+  if (priv->stream && priv->context) {
+    gst_cuda_context_push (priv->context);
+    gst_cuda_result (CuStreamDestroy (priv->stream));
+    gst_cuda_context_pop (nullptr);
+  }
+  priv->stream = nullptr;
+
   gst_clear_object (&priv->context);
   gst_clear_caps (&priv->caps);
 

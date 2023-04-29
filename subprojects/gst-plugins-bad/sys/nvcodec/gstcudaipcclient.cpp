@@ -164,7 +164,6 @@ gst_cuda_ipc_client_finalize (GObject * object)
 
   delete self->priv;
 
-  gst_clear_cuda_stream (&self->stream);
   gst_clear_object (&self->context);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
@@ -469,8 +468,6 @@ gst_cuda_client_update_caps (GstCudaIpcClient * self, GstCaps * caps)
 
     gst_buffer_pool_config_set_params (config, priv->caps,
         GST_VIDEO_INFO_SIZE (&priv->info), 0, 0);
-    if (self->stream)
-      gst_buffer_pool_config_set_cuda_stream (config, self->stream);
 
     if (!gst_buffer_pool_set_config (priv->pool, config)) {
       GST_ERROR_OBJECT (self, "Couldn't set pool config");
@@ -501,7 +498,6 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
   GstCudaMemory *cmem;
   GstMapInfo info;
   CUDA_MEMCPY2D copy_param;
-  CUstream stream;
   GstSample *sample;
   GstClockTime pts;
   GstCaps *caps = nullptr;
@@ -604,8 +600,6 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
     copy_param.dstMemoryType = CU_MEMORYTYPE_DEVICE;
     copy_param.dstPitch = cmem->info.stride[0];
 
-    stream = gst_cuda_stream_get_handle (self->stream);
-
     for (guint i = 0; i < GST_VIDEO_INFO_N_PLANES (&priv->info); i++) {
       copy_param.srcDevice = (CUdeviceptr) ((guint8 *) dptr + layout.offset[i]);
       copy_param.dstDevice = (CUdeviceptr) ((guint8 *) info.data +
@@ -613,14 +607,13 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
       copy_param.WidthInBytes = GST_VIDEO_INFO_COMP_WIDTH (&priv->info, i)
           * GST_VIDEO_INFO_COMP_PSTRIDE (&priv->info, i);
       copy_param.Height = GST_VIDEO_INFO_COMP_HEIGHT (&priv->info, i);
-      gst_cuda_result (CuMemcpy2DAsync (&copy_param, stream));
+      gst_cuda_result (CuMemcpy2DAsync (&copy_param, self->stream));
     }
 
-    gst_cuda_result (CuStreamSynchronize (stream));
+    gst_cuda_result (CuStreamSynchronize (self->stream));
     gst_cuda_context_pop (nullptr);
 
     gst_memory_unmap (mem, &info);
-    GST_MINI_OBJECT_FLAG_UNSET (mem, GST_CUDA_MEMORY_TRANSFER_NEED_SYNC);
 
     priv->unused_data.push (handle);
   } else {
@@ -632,7 +625,7 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
     data->imported = import_data;
 
     mem = gst_cuda_allocator_alloc_wrapped (nullptr, self->context,
-        nullptr, &vinfo, dptr, data,
+        &vinfo, dptr, data,
         (GDestroyNotify) gst_cuda_ipc_client_release_imported_data);
     GST_MINI_OBJECT_FLAG_SET (mem, GST_MEMORY_FLAG_READONLY);
 

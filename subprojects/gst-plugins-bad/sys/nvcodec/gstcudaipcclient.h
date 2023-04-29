@@ -51,7 +51,7 @@ struct GstCudaIpcClient
   GstObject parent;
 
   GstCudaContext *context;
-  GstCudaStream *stream;
+  CUstream stream;
   GstCudaIpcIOMode io_mode;
 
   GstCudaIpcClientPrivate *priv;

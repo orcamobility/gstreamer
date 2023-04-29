@@ -303,10 +303,6 @@ gst_cuda_ipc_server_have_data (GstCudaIpcServer * self,
     GstCudaIpcServerConn * conn)
 {
   GstCaps *caps;
-  GstBuffer *buffer;
-  GstCudaMemory *cmem;
-  GstCudaStream *stream;
-  CUstream stream_handle;
 
   if (!conn->data) {
     GST_ERROR_OBJECT (self, "Have no data to send, conn-id: %u", conn->id);
@@ -335,18 +331,13 @@ gst_cuda_ipc_server_have_data (GstCudaIpcServer * self,
     return;
   }
 
-  buffer = gst_sample_get_buffer (conn->data->sample);
-  cmem = (GstCudaMemory *) gst_buffer_peek_memory (buffer, 0);
-  stream = gst_cuda_memory_get_stream (cmem);
-  stream_handle = gst_cuda_stream_get_handle (stream);
-
   if (!gst_cuda_context_push (self->context)) {
     GST_ERROR_OBJECT (self, "Couldn't push context");
     gst_cuda_ipc_server_close_connection (self, conn);
     return;
   }
 
-  if (!gst_cuda_result (CuEventRecord (conn->event, stream_handle))) {
+  if (!gst_cuda_result (CuEventRecord (conn->event, nullptr))) {
     GST_ERROR_OBJECT (self, "Couldn't record event");
     gst_cuda_context_pop (nullptr);
     gst_cuda_ipc_server_close_connection (self, conn);

@@ -29,7 +29,7 @@ G_DECLARE_FINAL_TYPE (GstCudaIpcClientUnix, gst_cuda_ipc_client_unix,
 
 GstCudaIpcClient * gst_cuda_ipc_client_new (const gchar * address,
                                             GstCudaContext * context,
-                                            GstCudaStream * stream,
+                                            CUstream stream,
                                             GstCudaIpcIOMode io_mode,
                                             guint timeout);
 

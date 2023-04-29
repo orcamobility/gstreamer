@@ -80,7 +80,7 @@ enum
 struct GstCudaIpcSinkPrivate
 {
   GstCudaContext *context = nullptr;
-  GstCudaStream *stream = nullptr;
+  CUstream stream = nullptr;
 
   GstBufferPool *fallback_pool = nullptr;
   GstVideoInfo info;
@@ -297,15 +297,24 @@ gst_cuda_ipc_sink_start (GstBaseSink * sink)
     return FALSE;
   }
 
+  if (gst_cuda_context_push (priv->context)) {
+    CuStreamCreate (&priv->stream, CU_STREAM_DEFAULT);
+    gst_cuda_context_pop (nullptr);
+  }
+
   priv->server = gst_cuda_ipc_server_new (priv->address.c_str (),
       priv->context);
   if (!priv->server) {
+    if (priv->stream) {
+      gst_cuda_context_push (priv->context);
+      gst_cuda_result (CuStreamDestroy (priv->stream));
+      gst_cuda_context_pop (nullptr);
+    }
+    priv->stream = nullptr;
     gst_clear_object (&priv->context);
     GST_ERROR_OBJECT (self, "Couldn't create server object");
     return FALSE;
   }
-
-  priv->stream = gst_cuda_stream_new (priv->context);
 
   return TRUE;
 }
@@ -330,7 +339,14 @@ gst_cuda_ipc_sink_stop (GstBaseSink * sink)
   }
 
   gst_clear_sample (&priv->prepared_sample);
-  gst_clear_cuda_stream (&priv->stream);
+
+  if (priv->stream && priv->context) {
+    gst_cuda_context_push (priv->context);
+    gst_cuda_result (CuStreamDestroy (priv->stream));
+    gst_cuda_context_pop (nullptr);
+  }
+  priv->stream = nullptr;
+
   gst_clear_object (&priv->context);
 
   return TRUE;
@@ -424,8 +440,6 @@ gst_cuda_ipc_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
   gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
   gst_buffer_pool_config_set_params (config, priv->caps,
       GST_VIDEO_INFO_SIZE (&priv->info), 0, 0);
-  if (priv->stream)
-    gst_buffer_pool_config_set_cuda_stream (config, priv->stream);
 
   if (!gst_buffer_pool_set_config (priv->fallback_pool, config)) {
     GST_ERROR_OBJECT (self, "Couldn't set pool config");
@@ -474,8 +488,6 @@ gst_cuda_ipc_sink_propose_allocation (GstBaseSink * sink, GstQuery * query)
     config = gst_buffer_pool_get_config (pool);
     gst_buffer_pool_config_add_option (config,
         GST_BUFFER_POOL_OPTION_VIDEO_META);
-    if (priv->stream)
-      gst_buffer_pool_config_set_cuda_stream (config, priv->stream);
 
     size = GST_VIDEO_INFO_SIZE (&info);
     gst_buffer_pool_config_set_params (config,
@@ -579,7 +591,6 @@ gst_cuda_ipc_sink_prepare (GstBaseSink * sink, GstBuffer * buf)
 
   cmem = GST_CUDA_MEMORY_CAST (mem);
   priv->mem_info = cmem->info;
-  gst_cuda_memory_sync (cmem);
 
   if (!gst_cuda_context_push (cmem->context)) {
     GST_ERROR_OBJECT (self, "Couldn't push context");
