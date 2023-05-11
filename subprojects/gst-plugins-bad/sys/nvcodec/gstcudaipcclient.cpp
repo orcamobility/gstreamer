@@ -807,6 +807,8 @@ gst_cuda_ipc_client_config_data (GstCudaIpcClient * self)
     return false;
   }
 
+  gst_cuda_context_pop (nullptr);
+
   conn->event = event;
   priv->cond.notify_all ();
 
