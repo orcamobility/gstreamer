@@ -59,8 +59,7 @@ gst_cuda_ipc_pkt_identify (std::vector < guint8 > &buf,
 }
 
 bool
-gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf,
-    const CUipcEventHandle & handle, GstCaps * caps)
+gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf, GstCaps * caps)
 {
   GstCudaIpcPacketHeader header;
   guint8 *ptr;
@@ -77,7 +76,7 @@ gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf,
 
   header.type = GstCudaIpcPktType::CONFIG;
   header.magic = GST_CUDA_IPC_MAGIC_NUMBER;
-  header.payload_size = sizeof (CUipcEventHandle) + caps_size;
+  header.payload_size = caps_size;
 
   buf.resize (GST_CUDA_IPC_PKT_HEADER_SIZE + header.payload_size);
 
@@ -86,9 +85,6 @@ gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf,
   memcpy (ptr, &header, GST_CUDA_IPC_PKT_HEADER_SIZE);
   ptr += GST_CUDA_IPC_PKT_HEADER_SIZE;
 
-  memcpy (ptr, &handle, sizeof (CUipcEventHandle));
-  ptr += sizeof (CUipcEventHandle);
-
   strcpy ((char *) ptr, caps_str);
   g_free (caps_str);
 
@@ -96,8 +92,7 @@ gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf,
 }
 
 bool
-gst_cuda_ipc_pkt_parse_config (std::vector < guint8 > &buf,
-    CUipcEventHandle & handle, GstCaps ** caps)
+gst_cuda_ipc_pkt_parse_config (std::vector < guint8 > &buf, GstCaps ** caps)
 {
   GstCudaIpcPacketHeader header;
   const guint8 *ptr;
@@ -112,14 +107,11 @@ gst_cuda_ipc_pkt_parse_config (std::vector < guint8 > &buf,
 
   if (header.type != GstCudaIpcPktType::CONFIG ||
       header.magic != GST_CUDA_IPC_MAGIC_NUMBER ||
-      header.payload_size <= sizeof (CUipcEventHandle)) {
+      header.payload_size <= 1) {
     return false;
   }
 
   ptr += GST_CUDA_IPC_PKT_HEADER_SIZE;
-
-  memcpy (&handle, ptr, sizeof (CUipcEventHandle));
-  ptr += sizeof (CUipcEventHandle);
 
   *caps = gst_caps_from_string ((const gchar *) ptr);
   if (*caps == nullptr)

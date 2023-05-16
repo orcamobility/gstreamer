@@ -239,8 +239,7 @@ gst_cuda_ipc_server_config_data (GstCudaIpcServer * self,
 
   gst_caps_replace (&conn->caps, caps);
 
-  gst_cuda_ipc_pkt_build_config (conn->server_msg, conn->event_handle,
-      conn->caps);
+  gst_cuda_ipc_pkt_build_config (conn->server_msg, conn->caps);
   conn->type = GstCudaIpcPktType::CONFIG;
 
   GST_LOG_OBJECT (self, "Sending CONFIG, conn-id %u", conn->id);
@@ -252,36 +251,11 @@ gst_cuda_ipc_server_on_incoming_connection (GstCudaIpcServer * server,
     std::shared_ptr < GstCudaIpcServerConn > conn)
 {
   GstCudaIpcServerPrivate *priv = server->priv;
-  CUevent event;
-  CUipcEventHandle event_handle;
-
-  if (!gst_cuda_context_push (server->context)) {
-    GST_ERROR_OBJECT (server, "Couldn't push context");
-    return;
-  }
-
-  if (!gst_cuda_result (CuEventCreate (&event,
-              CU_EVENT_INTERPROCESS | CU_EVENT_DISABLE_TIMING))) {
-    GST_ERROR_OBJECT (server, "Couldn't create cuda event object");
-    gst_cuda_context_pop (nullptr);
-    return;
-  }
-
-  if (!gst_cuda_result (CuIpcGetEventHandle (&event_handle, event))) {
-    GST_ERROR_OBJECT (server, "Couldn't get event handle");
-    CuEventDestroy (event);
-    gst_cuda_context_pop (nullptr);
-    return;
-  }
-
-  gst_cuda_context_pop (nullptr);
 
   priv->lock.lock ();
   conn->server = server;
   conn->id = priv->next_conn_id;
   conn->context = (GstCudaContext *) gst_object_ref (server->context);
-  conn->event = event;
-  conn->event_handle = event_handle;
   conn->data = priv->data;
   priv->next_conn_id++;
   priv->lock.unlock ();
@@ -330,21 +304,6 @@ gst_cuda_ipc_server_have_data (GstCudaIpcServer * self,
     gst_cuda_ipc_server_close_connection (self, conn);
     return;
   }
-
-  if (!gst_cuda_context_push (self->context)) {
-    GST_ERROR_OBJECT (self, "Couldn't push context");
-    gst_cuda_ipc_server_close_connection (self, conn);
-    return;
-  }
-
-  if (!gst_cuda_result (CuEventRecord (conn->event, nullptr))) {
-    GST_ERROR_OBJECT (self, "Couldn't record event");
-    gst_cuda_context_pop (nullptr);
-    gst_cuda_ipc_server_close_connection (self, conn);
-    return;
-  }
-
-  gst_cuda_context_pop (nullptr);
 
   auto handle_dump = gst_cuda_ipc_mem_handle_to_string (conn->data->handle);
   GST_LOG_OBJECT (self, "Sending HAVE-DATA with handle %s, conn-id: %u",

@@ -125,12 +125,6 @@ struct GstCudaIpcServerConn : public OVERLAPPED
 
   virtual ~GstCudaIpcServerConn()
   {
-    if (context && event) {
-      gst_cuda_context_push (context);
-      gst_cuda_result (CuEventDestroy (event));
-      gst_cuda_context_pop (nullptr);
-    }
-
     gst_clear_object (&context);
     gst_clear_caps (&caps);
   }
@@ -138,8 +132,6 @@ struct GstCudaIpcServerConn : public OVERLAPPED
   GstCudaIpcServer *server;
 
   GstCudaContext *context = nullptr;
-  CUevent event = nullptr;
-  CUipcEventHandle event_handle;
 
   GstCudaIpcPktType type;
   std::vector<guint8> client_msg;

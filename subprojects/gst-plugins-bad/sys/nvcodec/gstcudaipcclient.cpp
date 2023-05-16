@@ -576,15 +576,6 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
     dptr = import_data->dptr;
   }
 
-  if (!gst_cuda_result (CuEventSynchronize (conn->event))) {
-    GST_ERROR_OBJECT (self, "Couldn't synchronize event");
-    gst_cuda_context_pop (nullptr);
-    lk.unlock ();
-
-    import_data = nullptr;
-    return false;
-  }
-
   if (self->io_mode == GST_CUDA_IPC_IO_COPY) {
     gst_buffer_pool_acquire_buffer (priv->pool, &buffer, nullptr);
     mem = gst_buffer_peek_memory (buffer, 0);
@@ -756,7 +747,6 @@ gst_cuda_ipc_client_continue (GstCudaIpcClient * self)
 
         priv->sent_fin = true;
         gst_cuda_ipc_pkt_build_fin (conn->client_msg);
-        conn->CloseResource ();
         conn->type = GstCudaIpcPktType::FIN;
 
         GST_DEBUG_OBJECT (self, "Sending FIN");
@@ -782,13 +772,11 @@ static bool
 gst_cuda_ipc_client_config_data (GstCudaIpcClient * self)
 {
   GstCudaIpcClientPrivate *priv = self->priv;
-  CUevent event;
-  CUipcEventHandle handle;
   GstCaps *caps = nullptr;
   auto conn = priv->conn;
   std::lock_guard < std::mutex > lk (priv->lock);
 
-  if (!gst_cuda_ipc_pkt_parse_config (conn->server_msg, handle, &caps)) {
+  if (!gst_cuda_ipc_pkt_parse_config (conn->server_msg, &caps)) {
     GST_ERROR_OBJECT (self, "Couldn't parse CONFIG-DATA");
     return false;
   }
@@ -796,20 +784,6 @@ gst_cuda_ipc_client_config_data (GstCudaIpcClient * self)
   if (!gst_cuda_client_update_caps (self, caps))
     return false;
 
-  if (!gst_cuda_context_push (self->context)) {
-    GST_ERROR_OBJECT (self, "Couldn't push context");
-    return false;
-  }
-
-  if (!gst_cuda_result (CuIpcOpenEventHandle (&event, handle))) {
-    GST_ERROR_OBJECT (self, "Couldn't open event from handle");
-    gst_cuda_context_pop (nullptr);
-    return false;
-  }
-
-  gst_cuda_context_pop (nullptr);
-
-  conn->event = event;
   priv->cond.notify_all ();
 
   return true;
