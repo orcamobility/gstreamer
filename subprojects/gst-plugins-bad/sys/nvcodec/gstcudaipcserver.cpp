@@ -226,7 +226,8 @@ gst_cuda_ipc_server_send_msg (GstCudaIpcServer * self,
   GstCudaIpcServerClass *klass = GST_CUDA_IPC_SERVER_GET_CLASS (self);
 
   if (!klass->send_msg (self, conn)) {
-    GST_WARNING_OBJECT (self, "Send msg failed");
+    GST_WARNING_OBJECT (self, "Send msg failed, id: %u, type %d",
+        conn->id, (guint) conn->type);
     gst_cuda_ipc_server_close_connection (self, conn);
   }
 }
@@ -431,7 +432,8 @@ gst_cuda_ipc_server_send_msg_finish (GstCudaIpcServer * server,
     GstCudaIpcServerConn * conn, bool result)
 {
   if (!result) {
-    GST_WARNING_OBJECT (server, "Send msg failed, conn-id %u", conn->id);
+    GST_WARNING_OBJECT (server, "Send msg failed, conn-id %u, type %d",
+        conn->id, (guint) conn->type);
     gst_cuda_ipc_server_close_connection (server, conn);
     return;
   }
@@ -450,7 +452,7 @@ gst_cuda_ipc_server_send_msg_finish (GstCudaIpcServer * server,
       gst_cuda_ipc_server_wait_msg (server, conn);
       break;
     default:
-      GST_ERROR_OBJECT (server, "Unexpected msg type");
+      GST_ERROR_OBJECT (server, "Unexpected msg type %u", (guint) conn->type);
       gst_cuda_ipc_server_close_connection (server, conn);
       break;
   }

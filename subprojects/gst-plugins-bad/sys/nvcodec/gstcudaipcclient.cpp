@@ -553,7 +553,8 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
         handle, CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
     if (ret != CUDA_ERROR_ALREADY_MAPPED && !gst_cuda_result (ret)) {
       gst_cuda_context_pop (nullptr);
-      GST_ERROR_OBJECT (self, "Couldn't open memory handle");
+      GST_ERROR_OBJECT (self, "Couldn't open memory handle %s",
+          handle_dump.c_str ());
       return false;
     }
 
