@@ -56,6 +56,7 @@ GST_DEBUG_CATEGORY (gst_nvcodec_debug);
 GST_DEBUG_CATEGORY (gst_nvdec_debug);
 GST_DEBUG_CATEGORY (gst_nvenc_debug);
 GST_DEBUG_CATEGORY (gst_nv_decoder_debug);
+GST_DEBUG_CATEGORY (gst_cuda_ipc_debug);
 
 #ifdef HAVE_NVCODEC_NVMM
 GST_DEBUG_CATEGORY (gst_cuda_nvmm_debug);
@@ -87,6 +88,7 @@ plugin_init (GstPlugin * plugin)
   GST_DEBUG_CATEGORY_INIT (gst_nvdec_debug, "nvdec", 0, "nvdec");
   GST_DEBUG_CATEGORY_INIT (gst_nvenc_debug, "nvenc", 0, "nvenc");
   GST_DEBUG_CATEGORY_INIT (gst_nv_decoder_debug, "nvdecoder", 0, "nvdecoder");
+  GST_DEBUG_CATEGORY_INIT (gst_cuda_ipc_debug, "cudaipc", 0, "cudaipc");
 
 #ifdef HAVE_NVCODEC_NVMM
   GST_DEBUG_CATEGORY_INIT (gst_cuda_nvmm_debug, "cudanvmm", 0, "cudanvmm");

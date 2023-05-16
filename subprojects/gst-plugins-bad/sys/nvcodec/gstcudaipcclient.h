@@ -119,24 +119,11 @@ struct GstCudaIpcClientConn : public OVERLAPPED
 
   virtual ~GstCudaIpcClientConn()
   {
-    CloseResource ();
     gst_clear_object (&context);
-  }
-
-  void CloseResource (void)
-  {
-    if (context && event) {
-      gst_cuda_context_push (context);
-      gst_cuda_result (CuEventDestroy (event));
-      gst_cuda_context_pop (nullptr);
-    }
-
-    event = nullptr;
   }
 
   GstCudaIpcClient *client;
 
-  CUevent event = nullptr;
   GstCudaContext *context = nullptr;
 
   GstCudaIpcPktType type;

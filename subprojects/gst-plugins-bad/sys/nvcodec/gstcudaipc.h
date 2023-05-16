@@ -103,11 +103,9 @@ bool  gst_cuda_ipc_pkt_identify (std::vector<guint8> & buf,
                                  GstCudaIpcPacketHeader & header);
 
 bool  gst_cuda_ipc_pkt_build_config (std::vector<guint8> & buf,
-                                     const CUipcEventHandle & handle,
                                      GstCaps * caps);
 
 bool  gst_cuda_ipc_pkt_parse_config (std::vector<guint8> & buf,
-                                     CUipcEventHandle & handle,
                                      GstCaps ** caps);
 
 void  gst_cuda_ipc_pkt_build_need_data (std::vector<guint8> & buf);

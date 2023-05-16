@@ -34,6 +34,13 @@
 #include <windows.h>
 #endif
 
+/* *INDENT-OFF* */
+extern "C" {
+GST_DEBUG_CATEGORY_EXTERN (gst_cuda_ipc_debug);
+#define GST_CAT_DEFAULT gst_cuda_ipc_debug
+}
+/* *INDENT-ON* */
+
 #define GST_CUDA_IPC_MAGIC_NUMBER 0xC0DA10C0
 
 constexpr guint GST_CUDA_IPC_PKT_HAVE_DATA_PAYLOAD_MIN_SIZE =
@@ -50,8 +57,10 @@ gst_cuda_ipc_pkt_identify (std::vector < guint8 > &buf,
 
   memcpy (&header, &buf[0], GST_CUDA_IPC_PKT_HEADER_SIZE);
 
-  if (header.magic != GST_CUDA_IPC_MAGIC_NUMBER)
+  if (header.magic != GST_CUDA_IPC_MAGIC_NUMBER) {
+    GST_ERROR ("Magic number mismatch");
     return false;
+  }
 
   buf.resize (GST_CUDA_IPC_PKT_HEADER_SIZE + header.payload_size);
 
@@ -59,8 +68,7 @@ gst_cuda_ipc_pkt_identify (std::vector < guint8 > &buf,
 }
 
 bool
-gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf,
-    const CUipcEventHandle & handle, GstCaps * caps)
+gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf, GstCaps * caps)
 {
   GstCudaIpcPacketHeader header;
   guint8 *ptr;
@@ -70,14 +78,16 @@ gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf,
   g_return_val_if_fail (GST_IS_CAPS (caps), false);
 
   caps_str = gst_caps_serialize (caps, GST_SERIALIZE_FLAG_NONE);
-  if (!caps_str)
+  if (!caps_str) {
+    GST_ERROR ("Couldn't serialize caps");
     return false;
+  }
 
   caps_size = strlen (caps_str) + 1;
 
   header.type = GstCudaIpcPktType::CONFIG;
   header.magic = GST_CUDA_IPC_MAGIC_NUMBER;
-  header.payload_size = sizeof (CUipcEventHandle) + caps_size;
+  header.payload_size = caps_size;
 
   buf.resize (GST_CUDA_IPC_PKT_HEADER_SIZE + header.payload_size);
 
@@ -86,9 +96,6 @@ gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf,
   memcpy (ptr, &header, GST_CUDA_IPC_PKT_HEADER_SIZE);
   ptr += GST_CUDA_IPC_PKT_HEADER_SIZE;
 
-  memcpy (ptr, &handle, sizeof (CUipcEventHandle));
-  ptr += sizeof (CUipcEventHandle);
-
   strcpy ((char *) ptr, caps_str);
   g_free (caps_str);
 
@@ -96,8 +103,7 @@ gst_cuda_ipc_pkt_build_config (std::vector < guint8 > &buf,
 }
 
 bool
-gst_cuda_ipc_pkt_parse_config (std::vector < guint8 > &buf,
-    CUipcEventHandle & handle, GstCaps ** caps)
+gst_cuda_ipc_pkt_parse_config (std::vector < guint8 > &buf, GstCaps ** caps)
 {
   GstCudaIpcPacketHeader header;
   const guint8 *ptr;
@@ -110,16 +116,22 @@ gst_cuda_ipc_pkt_parse_config (std::vector < guint8 > &buf,
   ptr = &buf[0];
   memcpy (&header, ptr, GST_CUDA_IPC_PKT_HEADER_SIZE);
 
-  if (header.type != GstCudaIpcPktType::CONFIG ||
-      header.magic != GST_CUDA_IPC_MAGIC_NUMBER ||
-      header.payload_size <= sizeof (CUipcEventHandle)) {
+  if (header.type != GstCudaIpcPktType::CONFIG) {
+    GST_ERROR ("type mismatch, %d", (guint) header.type);
+    return false;
+  }
+
+  if (header.magic != GST_CUDA_IPC_MAGIC_NUMBER) {
+    GST_ERROR ("Magic number mismatch");
+    return false;
+  }
+
+  if (header.payload_size <= 1) {
+    GST_ERROR ("Too small payload");
     return false;
   }
 
   ptr += GST_CUDA_IPC_PKT_HEADER_SIZE;
-
-  memcpy (&handle, ptr, sizeof (CUipcEventHandle));
-  ptr += sizeof (CUipcEventHandle);
 
   *caps = gst_caps_from_string ((const gchar *) ptr);
   if (*caps == nullptr)
@@ -157,8 +169,10 @@ gst_cuda_ipc_pkt_build_have_data (std::vector < guint8 > &buf, GstClockTime pts,
 
   if (caps) {
     caps_str = gst_caps_serialize (caps, GST_SERIALIZE_FLAG_NONE);
-    if (!caps_str)
+    if (!caps_str) {
+      GST_ERROR ("Couldn't serialize caps");
       return false;
+    }
 
     caps_size = strlen (caps_str) + 1;
   }
@@ -231,11 +245,21 @@ gst_cuda_ipc_pkt_parse_have_data (const std::vector < guint8 > &buf,
   ptr = &buf[0];
   memcpy (&header, ptr, GST_CUDA_IPC_PKT_HEADER_SIZE);
 
-  if (header.type != GstCudaIpcPktType::HAVE_DATA ||
-      header.magic != GST_CUDA_IPC_MAGIC_NUMBER ||
-      header.payload_size < GST_CUDA_IPC_PKT_HAVE_DATA_PAYLOAD_MIN_SIZE) {
+  if (header.type != GstCudaIpcPktType::HAVE_DATA) {
+    GST_ERROR ("type mismatch, %d", (guint) header.type);
     return false;
   }
+
+  if (header.magic != GST_CUDA_IPC_MAGIC_NUMBER) {
+    GST_ERROR ("Magic number mismatch");
+    return false;
+  }
+
+  if (header.payload_size < GST_CUDA_IPC_PKT_HAVE_DATA_PAYLOAD_MIN_SIZE) {
+    GST_ERROR ("Too small payload");
+    return false;
+  }
+
   ptr += GST_CUDA_IPC_PKT_HEADER_SIZE;
 
   memcpy (&pts, ptr, sizeof (GstClockTime));
@@ -251,8 +275,10 @@ gst_cuda_ipc_pkt_parse_have_data (const std::vector < guint8 > &buf,
   ptr++;
   if (have_caps) {
     *caps = gst_caps_from_string ((const gchar *) ptr);
-    if (*caps == nullptr)
+    if (*caps == nullptr) {
+      GST_ERROR ("Couldn't build caps from string");
       return false;
+    }
 
     ptr += strlen ((const gchar *) ptr) + 1;
   }
