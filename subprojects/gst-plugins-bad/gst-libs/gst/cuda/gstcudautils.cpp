@@ -61,8 +61,8 @@ _init_debug (void)
 static gboolean
 pad_query (const GValue * item, GValue * value, gpointer user_data)
 {
-  GstPad *pad = g_value_get_object (item);
-  GstQuery *query = user_data;
+  GstPad *pad = (GstPad *) g_value_get_object (item);
+  GstQuery *query = (GstQuery *) user_data;
   gboolean res;
 
   res = gst_pad_peer_query (pad, query);
@@ -300,7 +300,7 @@ gst_cuda_handle_set_context (GstElement * element,
             &other_ctx, NULL)) {
       g_object_get (other_ctx, "cuda-device-id", &other_device_id, NULL);
 
-      if (device_id == -1 || other_device_id == device_id) {
+      if (device_id == -1 || other_device_id == (guint) device_id) {
         GST_CAT_DEBUG_OBJECT (GST_CAT_CONTEXT, element, "Found CUDA context");
         *cuda_ctx = other_ctx;
 
@@ -451,9 +451,9 @@ gst_cuda_graphics_resource_new (GstCudaContext *
   _init_debug ();
 
   resource = g_new0 (GstCudaGraphicsResource, 1);
-  resource->cuda_context = gst_object_ref (context);
+  resource->cuda_context = (GstCudaContext *) gst_object_ref (context);
   if (graphics_context)
-    resource->graphics_context = gst_object_ref (graphics_context);
+    resource->graphics_context = (GstObject *) gst_object_ref (graphics_context);
 
   return resource;
 }
@@ -768,8 +768,8 @@ gst_cuda_buffer_fallback_copy (GstBuffer * dst, const GstVideoInfo * dst_info,
     dst_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&dst_frame, i);
     src_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&src_frame, i);
 
-    dst_data = GST_VIDEO_FRAME_PLANE_DATA (&dst_frame, i);
-    src_data = GST_VIDEO_FRAME_PLANE_DATA (&src_frame, i);
+    dst_data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&dst_frame, i);
+    src_data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&src_frame, i);
 
     for (j = 0; j < height; j++) {
       memcpy (dst_data, src_data, width_in_bytes);
@@ -909,7 +909,7 @@ map_buffer_and_fill_copy2d (GstBuffer * buf, const GstVideoInfo * info,
       map_flags = GST_MAP_WRITE;
 
     if (copy_type == GST_CUDA_BUFFER_COPY_CUDA)
-      map_flags |= GST_MAP_CUDA;
+      map_flags = (GstMapFlags) (map_flags | GST_MAP_CUDA);
 
     if (!gst_video_frame_map (frame, info, buf, map_flags)) {
       GST_ERROR ("Failed to map buffer");
