@@ -65,6 +65,7 @@ enum
   PROP_PROCESSING_DEADLINE,
   PROP_IO_MODE,
   PROP_CONN_TIMEOUT,
+  PROP_BUFFER_SIZE,
 };
 
 #define DEFAULT_DEVICE_ID -1
@@ -76,6 +77,7 @@ enum
 #define DEFAULT_PROCESSING_DEADLINE (20 * GST_MSECOND)
 #define DEFAULT_IO_MODE GST_CUDA_IPC_IO_COPY
 #define DEFAULT_CONN_TIMEOUT 5
+#define DEFAULT_BUFFER_SIZE 3
 
 /* *INDENT-OFF* */
 struct GstCudaIpcSrcPrivate
@@ -96,6 +98,7 @@ struct GstCudaIpcSrcPrivate
   GstClockTime processing_deadline = DEFAULT_PROCESSING_DEADLINE;
   GstCudaIpcIOMode io_mode = DEFAULT_IO_MODE;
   guint conn_timeout = DEFAULT_CONN_TIMEOUT;
+  guint buffer_size = DEFAULT_BUFFER_SIZE;
 };
 /* *INDENT-ON* */
 
@@ -173,6 +176,13 @@ gst_cuda_ipc_src_class_init (GstCudaIpcSrcClass * klass)
       g_param_spec_uint ("connection-timeout", "Connection Timeout",
           "Connection timeout in seconds (0 = never timeout)", 0, G_MAXINT,
           DEFAULT_CONN_TIMEOUT,
+          (GParamFlags) (G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
+              G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property (object_class, PROP_BUFFER_SIZE,
+      g_param_spec_uint ("buffer-size", "Buffer Size",
+          "Size of internal buffer", 1, G_MAXINT,
+          DEFAULT_BUFFER_SIZE,
           (GParamFlags) (G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
               G_PARAM_STATIC_STRINGS)));
 
@@ -266,6 +276,9 @@ gst_cuda_ipc_src_set_property (GObject * object, guint prop_id,
     case PROP_CONN_TIMEOUT:
       priv->conn_timeout = g_value_get_uint (value);
       break;
+    case PROP_BUFFER_SIZE:
+      priv->buffer_size = g_value_get_uint (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -295,6 +308,9 @@ gst_win32_video_src_get_property (GObject * object, guint prop_id,
       break;
     case PROP_CONN_TIMEOUT:
       g_value_set_uint (value, priv->conn_timeout);
+      break;
+    case PROP_BUFFER_SIZE:
+      g_value_set_uint (value, priv->buffer_size);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -340,7 +356,7 @@ gst_cuda_ipc_src_start (GstBaseSrc * src)
 
   std::lock_guard < std::mutex > lk (priv->lock);
   priv->client = gst_cuda_ipc_client_new (priv->address.c_str (), priv->context,
-      priv->stream, priv->io_mode, priv->conn_timeout);
+      priv->stream, priv->io_mode, priv->conn_timeout, priv->buffer_size - 1);
 
   return TRUE;
 }

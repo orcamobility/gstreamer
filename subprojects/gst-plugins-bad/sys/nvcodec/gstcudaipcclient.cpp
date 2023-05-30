@@ -649,7 +649,7 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
 
   /* Drops too old samples */
   std::queue < GstSample * >drop_queue;
-  while (priv->samples.size () > 2) {
+  while (priv->samples.size () > self->buffer_size) {
     drop_queue.push (priv->samples.front ());
     priv->samples.pop ();
   }

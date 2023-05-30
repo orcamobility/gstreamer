@@ -31,6 +31,7 @@ GstCudaIpcClient * gst_cuda_ipc_client_new (const gchar * address,
                                             GstCudaContext * context,
                                             CUstream stream,
                                             GstCudaIpcIOMode io_mode,
-                                            guint timeout);
+                                            guint timeout,
+                                            guint buffer_size);
 
 G_END_DECLS
