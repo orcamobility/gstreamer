@@ -24,6 +24,9 @@
 #include "gstcudautils.h"
 #include "gstcudacontext.h"
 #include "gstcuda-private.h"
+#include <set>
+#include <mutex>
+#include <string>
 
 #ifdef HAVE_NVCODEC_GST_GL
 #include <gst/gl/gl.h>
@@ -61,8 +64,8 @@ _init_debug (void)
 static gboolean
 pad_query (const GValue * item, GValue * value, gpointer user_data)
 {
-  GstPad *pad = g_value_get_object (item);
-  GstQuery *query = user_data;
+  GstPad *pad = (GstPad *) g_value_get_object (item);
+  GstQuery *query = (GstQuery *) user_data;
   gboolean res;
 
   res = gst_pad_peer_query (pad, query);
@@ -300,7 +303,7 @@ gst_cuda_handle_set_context (GstElement * element,
             &other_ctx, NULL)) {
       g_object_get (other_ctx, "cuda-device-id", &other_device_id, NULL);
 
-      if (device_id == -1 || other_device_id == device_id) {
+      if (device_id == -1 || other_device_id == (guint) device_id) {
         GST_CAT_DEBUG_OBJECT (GST_CAT_CONTEXT, element, "Found CUDA context");
         *cuda_ctx = other_ctx;
 
@@ -451,9 +454,9 @@ gst_cuda_graphics_resource_new (GstCudaContext *
   _init_debug ();
 
   resource = g_new0 (GstCudaGraphicsResource, 1);
-  resource->cuda_context = gst_object_ref (context);
+  resource->cuda_context = (GstCudaContext *) gst_object_ref (context);
   if (graphics_context)
-    resource->graphics_context = gst_object_ref (graphics_context);
+    resource->graphics_context = (GstObject *) gst_object_ref (graphics_context);
 
   return resource;
 }
@@ -768,8 +771,8 @@ gst_cuda_buffer_fallback_copy (GstBuffer * dst, const GstVideoInfo * dst_info,
     dst_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&dst_frame, i);
     src_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&src_frame, i);
 
-    dst_data = GST_VIDEO_FRAME_PLANE_DATA (&dst_frame, i);
-    src_data = GST_VIDEO_FRAME_PLANE_DATA (&src_frame, i);
+    dst_data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&dst_frame, i);
+    src_data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&src_frame, i);
 
     for (j = 0; j < height; j++) {
       memcpy (dst_data, src_data, width_in_bytes);
@@ -909,7 +912,7 @@ map_buffer_and_fill_copy2d (GstBuffer * buf, const GstVideoInfo * info,
       map_flags = GST_MAP_WRITE;
 
     if (copy_type == GST_CUDA_BUFFER_COPY_CUDA)
-      map_flags |= GST_MAP_CUDA;
+      map_flags = (GstMapFlags) (map_flags | GST_MAP_CUDA);
 
     if (!gst_video_frame_map (frame, info, buf, map_flags)) {
       GST_ERROR ("Failed to map buffer");
@@ -1618,4 +1621,76 @@ gst_cuda_buffer_copy (GstBuffer * dst, GstCudaBufferCopyType dst_type,
 
   return gst_cuda_buffer_copy_internal (dst, dst_type, dst_info,
       src, src_type, src_info, cuda_context, stream);
+}
+
+static gboolean
+_abort_on_error (CUresult result)
+{
+  static std::set < CUresult > abort_list;
+  GST_CUDA_CALL_ONCE_BEGIN {
+    const gchar *env = g_getenv ("GST_CUDA_CRITICAL_ERRORS");
+    if (!env)
+      return;
+
+    gchar **split = g_strsplit (env, ",", 0);
+    gchar **iter;
+    for (iter = split; *iter; iter++) {
+      int error_code = 0;
+      try {
+        error_code = std::stoi (*iter);
+      } catch ( ...) {
+        GST_WARNING ("Invalid argument \"%s\"", *iter);
+        continue;
+      };
+
+      if (error_code > 0)
+        abort_list.insert ((CUresult) error_code);
+    }
+
+    g_strfreev (split);
+  }
+  GST_CUDA_CALL_ONCE_END;
+
+  if (abort_list.empty ())
+    return FALSE;
+
+  if (abort_list.find (result) != abort_list.end ())
+    return TRUE;
+
+  return FALSE;
+}
+
+/**
+ * _gst_cuda_debug:
+ * @result: CUDA result code
+ * @cat: a #GstDebugCategory
+ * @file: the file that checking the result code
+ * @function: the function that checking the result code
+ * @line: the line that checking the result code
+ *
+ * Returns: %TRUE if CUDA device API call result is CUDA_SUCCESS
+ *
+ * Since: 1.24
+ */
+gboolean
+_gst_cuda_debug (CUresult result, GstDebugCategory * cat,
+    const gchar * file, const gchar * function, gint line)
+{
+  if (result != CUDA_SUCCESS) {
+#ifndef GST_DISABLE_GST_DEBUG
+    const gchar *_error_name, *_error_text;
+    CuGetErrorName (result, &_error_name);
+    CuGetErrorString (result, &_error_text);
+    gst_debug_log (cat, GST_LEVEL_WARNING, file, function, line,
+        NULL, "CUDA call failed: %s, %s", _error_name, _error_text);
+#endif
+    if (_abort_on_error (result)) {
+      GST_ERROR ("Critical error %d, abort", (gint) result);
+      g_abort ();
+    }
+
+    return FALSE;
+  }
+
+  return TRUE;
 }

@@ -53,6 +53,7 @@ struct GstCudaIpcClient
   GstCudaContext *context;
   CUstream stream;
   GstCudaIpcIOMode io_mode;
+  guint buffer_size;
 
   GstCudaIpcClientPrivate *priv;
 };

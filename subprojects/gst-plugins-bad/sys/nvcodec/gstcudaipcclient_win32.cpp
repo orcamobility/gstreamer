@@ -372,7 +372,7 @@ gst_cuda_ipc_client_win32_loop (GstCudaIpcClient * client)
 
 GstCudaIpcClient *
 gst_cuda_ipc_client_new (const gchar * address, GstCudaContext * context,
-    CUstream stream, GstCudaIpcIOMode io_mode, guint timeout)
+    CUstream stream, GstCudaIpcIOMode io_mode, guint timeout, guint buffer_size)
 {
   GstCudaIpcClient *client;
   GstCudaIpcClientWin32 *self;
@@ -391,6 +391,7 @@ gst_cuda_ipc_client_new (const gchar * address, GstCudaContext * context,
   client->context = (GstCudaContext *) gst_object_ref (context);
   client->stream = stream;
   client->io_mode = io_mode;
+  client->buffer_size = buffer_size;
 
   return client;
 }
