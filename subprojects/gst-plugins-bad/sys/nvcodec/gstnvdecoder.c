@@ -278,8 +278,9 @@ gst_nv_decoder_configure (GstNvDecoder * decoder, cudaVideoCodec codec,
 
   format = GST_VIDEO_INFO_FORMAT (info);
 
-  /* Additional 2 frame margin */
-  pool_size += 2;
+  /* h264 may require additional 1 frame because of its bumping process */
+  if (codec == cudaVideoCodec_H264)
+    pool_size += 1;
 
   /* Need pool size * 2 for decode-only (used for reference) frame
    * and output frame, AV1 film grain case for example */
