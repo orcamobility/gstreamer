@@ -22,6 +22,7 @@
 #endif
 
 #include "gstcudaipcclient.h"
+#include "gstcudaipcclient_c.h"
 #include <gst/cuda/gstcuda-private.h>
 #include <mutex>
 #include <condition_variable>
@@ -30,6 +31,21 @@
 
 GST_DEBUG_CATEGORY (gst_cuda_ipc_client_debug);
 #define GST_CAT_DEFAULT gst_cuda_ipc_client_debug
+
+static GThreadPool *gc_thread_pool = nullptr;
+/* *INDENT-OFF* */
+std::mutex gc_pool_lock;
+/* *INDENT-ON* */
+
+void
+gst_cuda_ipc_client_deinit (void)
+{
+  std::lock_guard < std::mutex > lk (gc_pool_lock);
+  if (gc_thread_pool) {
+    g_thread_pool_free (gc_thread_pool, FALSE, TRUE);
+    gc_thread_pool = nullptr;
+  }
+}
 
 GType
 gst_cuda_ipc_io_mode_get_type (void)
@@ -295,13 +311,11 @@ gst_cuda_ipc_client_get_caps (GstCudaIpcClient * client)
   return caps;
 }
 
-void
-gst_cuda_ipc_client_stop (GstCudaIpcClient * client)
+static void
+gst_cuda_ipc_client_stop_async (GstCudaIpcClient * client, gpointer user_data)
 {
   GstCudaIpcClientPrivate *priv;
   GstCudaIpcClientClass *klass;
-
-  g_return_if_fail (GST_IS_CUDA_IPC_CLIENT (client));
 
   priv = client->priv;
   klass = GST_CUDA_IPC_CLIENT_GET_CLASS (client);
@@ -322,6 +336,53 @@ gst_cuda_ipc_client_stop (GstCudaIpcClient * client)
   g_clear_pointer (&priv->loop_thread, g_thread_join);
 
   GST_DEBUG_OBJECT (client, "Stopped");
+
+  gst_object_unref (client);
+}
+
+static void
+gst_cuda_ipc_client_push_stop_async (GstCudaIpcClient * client)
+{
+  std::lock_guard < std::mutex > lk (gc_pool_lock);
+  if (!gc_thread_pool) {
+    gc_thread_pool = g_thread_pool_new ((GFunc) gst_cuda_ipc_client_stop_async,
+        nullptr, -1, FALSE, nullptr);
+  }
+
+  g_thread_pool_push (gc_thread_pool, gst_object_ref (client), nullptr);
+}
+
+void
+gst_cuda_ipc_client_stop (GstCudaIpcClient * client)
+{
+  GstCudaIpcClientPrivate *priv;
+  GstCudaIpcClientClass *klass;
+
+  g_return_if_fail (GST_IS_CUDA_IPC_CLIENT (client));
+
+  if (client->io_mode == GST_CUDA_IPC_IO_COPY) {
+    priv = client->priv;
+    klass = GST_CUDA_IPC_CLIENT_GET_CLASS (client);
+
+    GST_DEBUG_OBJECT (client, "Stopping");
+    priv->shutdown = true;
+    klass->invoke (client);
+
+    std::unique_lock < std::mutex > lk (priv->lock);
+    while (!priv->aborted)
+      priv->cond.wait (lk);
+    lk.unlock ();
+
+    GST_DEBUG_OBJECT (client, "Terminating");
+
+    klass->terminate (client);
+
+    g_clear_pointer (&priv->loop_thread, g_thread_join);
+
+    GST_DEBUG_OBJECT (client, "Stopped");
+  } else {
+    gst_cuda_ipc_client_push_stop_async (client);
+  }
 }
 
 static void
