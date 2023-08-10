@@ -51,6 +51,7 @@
 #include "gstnvh265encoder.h"
 #include "gstcudaipcsink.h"
 #include "gstcudaipcsrc.h"
+#include "gstcudaipcclient_c.h"
 
 GST_DEBUG_CATEGORY (gst_nvcodec_debug);
 GST_DEBUG_CATEGORY (gst_nvdec_debug);
@@ -63,6 +64,13 @@ GST_DEBUG_CATEGORY (gst_cuda_nvmm_debug);
 #endif
 
 #define GST_CAT_DEFAULT gst_nvcodec_debug
+
+
+static void
+plugin_deinit (gpointer data)
+{
+  gst_cuda_ipc_client_deinit ();
+}
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -323,6 +331,10 @@ plugin_init (GstPlugin * plugin)
     GST_INFO ("Enable NVMM support");
   }
 #endif
+
+  g_object_set_data_full (G_OBJECT (plugin),
+      "plugin-nvcodec-shutdown", (gpointer) "shutdown-data",
+      (GDestroyNotify) plugin_deinit);
 
   return TRUE;
 }
