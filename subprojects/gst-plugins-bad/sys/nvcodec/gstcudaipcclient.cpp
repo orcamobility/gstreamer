@@ -65,26 +65,31 @@ gst_cuda_ipc_io_mode_get_type (void)
 }
 
 /* *INDENT-OFF* */
-struct GstCudaIpcImportData
+struct GstCudaIpcHandle
 {
-  ~GstCudaIpcImportData ()
+  GstCudaIpcHandle (CUipcMemHandle mem_handle,
+      CUdeviceptr device_ptr, GstCudaContext * context)
   {
-    if (dptr) {
-      auto dump = gst_cuda_ipc_mem_handle_to_string (handle);
-      GST_LOG_OBJECT (client, "Release handle %s, %" G_GUINTPTR_FORMAT,
-          dump.c_str (), dptr);
-      gst_cuda_context_push (client->context);
-      gst_cuda_result (CuIpcCloseMemHandle (dptr));
-      gst_cuda_context_pop (nullptr);
-    }
-
-    gst_object_unref (client);
+    handle = mem_handle;
+    dptr = device_ptr;
+    ctx = (GstCudaContext *) gst_object_ref (context);
   }
 
-  GstCudaIpcClient *client;
+  ~GstCudaIpcHandle ()
+  {
+    gst_cuda_context_push (ctx);
+    CuIpcCloseMemHandle (dptr);
+    gst_cuda_context_pop (nullptr);
+  }
+
   CUipcMemHandle handle;
-  CUdeviceptr dptr = 0;
-  GstVideoInfo info;
+  CUdeviceptr dptr;
+  GstCudaContext *ctx;
+};
+
+struct GstCudaIpcImportData
+{
+  std::shared_ptr<GstCudaIpcHandle> handle;
 };
 
 struct GstCudaIpcReleaseData
@@ -92,6 +97,55 @@ struct GstCudaIpcReleaseData
   GstCudaIpcClient *self;
   std::shared_ptr<GstCudaIpcImportData> imported;
 };
+
+class GstCudaIpcImporter
+{
+public:
+  std::shared_ptr<GstCudaIpcHandle>
+  ImportHandle (CUipcMemHandle mem_handle, GstCudaContext * ctx)
+  {
+    std::lock_guard <std::mutex> lk (lock_);
+    CUresult ret;
+    CUdeviceptr dptr = 0;
+    auto it = import_table_.begin ();
+    while (it != import_table_.end ()) {
+      auto data = it->lock ();
+      if (!data) {
+        it = import_table_.erase (it);
+      } else if (gst_cuda_ipc_handle_is_equal (data->handle, mem_handle)) {
+        auto handle_dump = gst_cuda_ipc_mem_handle_to_string (mem_handle);
+        GST_LOG ("Returning already imported data %s", handle_dump.c_str ());
+        return data;
+      } else {
+        it++;
+      }
+    };
+
+    if (!gst_cuda_context_push (ctx))
+      return nullptr;
+
+    ret = CuIpcOpenMemHandle (&dptr,
+        mem_handle, CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+    gst_cuda_context_pop (nullptr);
+    if ((ret != CUDA_ERROR_ALREADY_MAPPED && !gst_cuda_result (ret)) || !dptr) {
+      GST_ERROR ("Couldn't open mem handle");
+      return nullptr;
+    }
+
+    auto rst = std::make_shared<GstCudaIpcHandle> (mem_handle, dptr, ctx);
+    import_table_.push_back (rst);
+
+    return rst;
+  }
+
+private:
+  std::vector<std::weak_ptr<GstCudaIpcHandle>> import_table_;
+  std::mutex lock_;
+};
+
+/* Global IPC handle table for legacy mode, since multiple CuIpcOpenMemHandle()
+ * call for the same IPC handle will return error */
+static GstCudaIpcImporter _ipc_importer;
 
 struct GstCudaIpcClientPrivate
 {
@@ -479,7 +533,7 @@ gst_cuda_ipc_client_release_imported_data (GstCudaIpcReleaseData * data)
   GstCudaIpcClientPrivate *priv = self->priv;
   GstCudaIpcClientClass *klass = GST_CUDA_IPC_CLIENT_GET_CLASS (self);
 
-  auto handle = data->imported->handle;
+  auto handle = data->imported->handle->handle;
   auto handle_dump = gst_cuda_ipc_mem_handle_to_string (handle);
 
   GST_LOG_OBJECT (self, "Releasing data %s", handle_dump.c_str ());
@@ -552,7 +606,6 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
   GstCudaIpcClientPrivate *priv = self->priv;
   CUipcMemHandle handle;
   GstCudaIpcMemLayout layout;
-  CUresult ret;
   CUdeviceptr dptr;
   GstBuffer *buffer;
   GstMemory *mem;
@@ -576,69 +629,68 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
   if (!gst_cuda_client_update_caps (self, caps))
     return false;
 
-  if (!gst_cuda_context_push (self->context)) {
-    GST_ERROR_OBJECT (self, "Couldn't push context");
-    return false;
-  }
-
   auto handle_dump = gst_cuda_ipc_mem_handle_to_string (handle);
   GST_LOG_OBJECT (self,
       "Importing handle %s, size %u, pitch %u, offset %u, %u, %u, %u",
       handle_dump.c_str (), layout.size, layout.pitch, layout.offset[0],
       layout.offset[1], layout.offset[2], layout.offset[3]);
 
-  /* Check if this memory handle was imported already */
-  /* *INDENT-OFF* */
-  if (self->io_mode == GST_CUDA_IPC_IO_IMPORT && !priv->imported.empty ()) {
-    GST_LOG_OBJECT (self, "Checking already imported handles, size %"
-        G_GSIZE_FORMAT, priv->imported.size ());
-    for (auto it = priv->imported.begin (); it != priv->imported.end (); ) {
+  auto import_handle = _ipc_importer.ImportHandle (handle, self->context);
+  if (!import_handle) {
+    GST_ERROR_OBJECT (self, "Couldn't open handle %s", handle_dump.c_str ());
+    return false;
+  }
+
+  dptr = import_handle->dptr;
+
+  if (self->io_mode != GST_CUDA_IPC_IO_COPY) {
+    auto it = priv->imported.begin ();
+    while (it != priv->imported.end ()) {
       auto data = it->lock ();
       if (!data) {
         it = priv->imported.erase (it);
+      } else if (data->handle == import_handle) {
+        import_data = data;
+        break;
       } else {
-        if (gst_cuda_ipc_handle_is_equal (data->handle, handle)) {
-          GST_DEBUG_OBJECT (self, "Already imported handle");
-          import_data = data;
-          break;
-        }
-
         it++;
       }
+    };
+
+    if (!import_data) {
+      import_data = std::make_shared < GstCudaIpcImportData > ();
+      import_data->handle = import_handle;
     }
   }
-  /* *INDENT-ON* */
 
-  if (!import_data) {
-    ret = CuIpcOpenMemHandle (&dptr,
-        handle, CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-    if (ret != CUDA_ERROR_ALREADY_MAPPED && !gst_cuda_result (ret)) {
-      gst_cuda_context_pop (nullptr);
-      GST_ERROR_OBJECT (self, "Couldn't open memory handle %s",
-          handle_dump.c_str ());
-      return false;
+  dptr = import_handle->dptr;
+
+  if (self->io_mode != GST_CUDA_IPC_IO_COPY) {
+    auto it = priv->imported.begin ();
+    while (it != priv->imported.end ()) {
+      auto data = it->lock ();
+      if (!data) {
+        it = priv->imported.erase (it);
+      } else if (data->handle == import_handle) {
+        import_data = data;
+        break;
+      } else {
+        it++;
+      }
+    };
+
+    if (!import_data) {
+      import_data = std::make_shared < GstCudaIpcImportData > ();
+      import_data->handle = import_handle;
     }
-
-    GST_LOG_OBJECT (self, "Imported device pointer %" G_GUINTPTR_FORMAT, dptr);
-
-    import_data = std::make_shared < GstCudaIpcImportData > ();
-    import_data->client = (GstCudaIpcClient *) gst_object_ref (self);
-    import_data->handle = handle;
-    import_data->dptr = dptr;
-    import_data->info = priv->info;
-    import_data->info.size = layout.size;
-    for (guint i = 0; i < GST_VIDEO_INFO_N_PLANES (&priv->info); i++) {
-      import_data->info.stride[i] = layout.pitch;
-      import_data->info.offset[i] = layout.offset[i];
-    }
-
-    if (self->io_mode == GST_CUDA_IPC_IO_IMPORT)
-      priv->imported.push_back (import_data);
-  } else {
-    dptr = import_data->dptr;
   }
 
   if (self->io_mode == GST_CUDA_IPC_IO_COPY) {
+    if (!gst_cuda_context_push (self->context)) {
+      GST_ERROR_OBJECT (self, "Couldn't push context");
+      return false;
+    }
+
     gst_buffer_pool_acquire_buffer (priv->pool, &buffer, nullptr);
     mem = gst_buffer_peek_memory (buffer, 0);
     gst_memory_map (mem, &info, (GstMapFlags) (GST_MAP_WRITE | GST_MAP_CUDA));
@@ -670,8 +722,14 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
 
     priv->unused_data.push (handle);
   } else {
-    GstMemory *mem;
-    GstVideoInfo vinfo = import_data->info;
+    GstVideoInfo vinfo = priv->info;
+
+    vinfo = priv->info;
+    vinfo.size = layout.size;
+    for (guint i = 0; i < GST_VIDEO_INFO_N_PLANES (&priv->info); i++) {
+      vinfo.stride[i] = layout.pitch;
+      vinfo.offset[i] = layout.offset[i];
+    }
 
     auto data = new GstCudaIpcReleaseData ();
     data->self = (GstCudaIpcClient *) gst_object_ref (self);
@@ -689,8 +747,6 @@ gst_cuda_ipc_client_have_data (GstCudaIpcClient * self)
         GST_VIDEO_INFO_FORMAT (&vinfo), GST_VIDEO_INFO_WIDTH (&vinfo),
         GST_VIDEO_INFO_HEIGHT (&vinfo), GST_VIDEO_INFO_N_PLANES (&vinfo),
         vinfo.offset, vinfo.stride);
-
-    gst_cuda_context_pop (nullptr);
   }
 
   GST_BUFFER_PTS (buffer) = pts;
