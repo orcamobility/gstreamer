@@ -34,7 +34,8 @@ GST_DEBUG_CATEGORY (gst_cuda_ipc_client_debug);
 
 static GThreadPool *gc_thread_pool = nullptr;
 /* *INDENT-OFF* */
-std::mutex gc_pool_lock;
+static std::mutex gc_pool_lock;
+static std::mutex import_lock_;
 /* *INDENT-ON* */
 
 void
@@ -77,9 +78,11 @@ struct GstCudaIpcHandle
 
   ~GstCudaIpcHandle ()
   {
+    std::lock_guard <std::mutex> lk (import_lock_);
     gst_cuda_context_push (ctx);
     CuIpcCloseMemHandle (dptr);
     gst_cuda_context_pop (nullptr);
+    gst_object_unref (ctx);
   }
 
   CUipcMemHandle handle;
@@ -104,7 +107,7 @@ public:
   std::shared_ptr<GstCudaIpcHandle>
   ImportHandle (CUipcMemHandle mem_handle, GstCudaContext * ctx)
   {
-    std::lock_guard <std::mutex> lk (lock_);
+    std::lock_guard <std::mutex> lk (import_lock_);
     CUresult ret;
     CUdeviceptr dptr = 0;
     auto it = import_table_.begin ();
@@ -140,7 +143,6 @@ public:
 
 private:
   std::vector<std::weak_ptr<GstCudaIpcHandle>> import_table_;
-  std::mutex lock_;
 };
 
 /* Global IPC handle table for legacy mode, since multiple CuIpcOpenMemHandle()
