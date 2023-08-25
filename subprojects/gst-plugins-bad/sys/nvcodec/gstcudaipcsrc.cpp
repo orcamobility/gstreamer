@@ -402,6 +402,8 @@ gst_cuda_ipc_src_unlock (GstBaseSrc * src)
   if (priv->client)
     gst_cuda_ipc_client_set_flushing (priv->client, true);
 
+  GST_DEBUG_OBJECT (self, "Unlocked");
+
   return TRUE;
 }
 
@@ -417,6 +419,8 @@ gst_cuda_ipc_src_unlock_stop (GstBaseSrc * src)
   priv->flushing = false;
   if (priv->client)
     gst_cuda_ipc_client_set_flushing (priv->client, false);
+
+  GST_DEBUG_OBJECT (self, "Unlock stopped");
 
   return TRUE;
 }
