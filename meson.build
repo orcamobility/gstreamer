@@ -84,9 +84,9 @@ if building_full and not get_option('tools').disabled()
 endif
 
 libnice_options = []
-if get_option('webrtc').enabled()
-  libnice_options += ['gstreamer=enabled']
-endif
+
+libnice_options += ['gstreamer=enabled']
+
 
 # Ordered list of subprojects (dict has no ordering guarantees)
 subprojects = [
