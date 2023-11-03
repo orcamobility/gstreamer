@@ -1,6 +1,6 @@
 project('gstreamer-full', 'c',
   version : '1.22.2.1',
-  meson_version : '>= 0.62.0',
+  meson_version : '>= 1.1',
   default_options : ['buildtype=debugoptimized',
                      # Needed due to https://github.com/mesonbuild/meson/issues/1889,
                      # but this can cause problems in the future. Remove it
@@ -83,12 +83,17 @@ if building_full and not get_option('tools').disabled()
   tools_option = ['tools=disabled']
 endif
 
+libnice_options = []
+if get_option('webrtc').enabled()
+  libnice_options += ['gstreamer=enabled']
+endif
+
 # Ordered list of subprojects (dict has no ordering guarantees)
 subprojects = [
   ['gstreamer', {'build-hotdoc': true, 'subproject_options': tools_option}],
   ['gst-plugins-base', {'option': get_option('base'), 'build-hotdoc': true}],
   ['gst-plugins-good', {'option': get_option('good'), 'build-hotdoc': true}],
-  ['libnice', { 'option': get_option('libnice'), 'match_gst_version': false}],
+  ['libnice', { 'option': get_option('libnice'), 'match_gst_version': false, 'subproject_options': libnice_options}],
   ['gst-plugins-bad', { 'option': get_option('bad'), 'build-hotdoc': true}],
   ['gst-plugins-ugly', { 'option': get_option('ugly'), 'build-hotdoc': true}],
   ['gst-libav', { 'option': get_option('libav'), 'build-hotdoc': true}],

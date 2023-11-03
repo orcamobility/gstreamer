@@ -17,6 +17,7 @@ option('gst-examples', type : 'feature', value : 'auto', description : 'Build gs
 option('tls', type : 'feature', value : 'auto', description : 'TLS support using glib-networking')
 option('qt5', type : 'feature', value : 'auto', description : 'Qt5 Support')
 option('tools', type : 'feature', value : 'auto', yield : true, description : 'Build command line tools')
+option('webrtc', type : 'feature', value : 'auto', description : 'WebRTC support')
 
 # Build for fuzzing
 option('oss_fuzz', type : 'feature', value : 'disabled',
