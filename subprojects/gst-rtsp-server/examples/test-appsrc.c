@@ -115,6 +115,7 @@ main (int argc, char *argv[])
    * any launch line works as long as it contains elements named pay%d. Each
    * element with pay%d names will be a stream */
   factory = gst_rtsp_media_factory_new ();
+  gst_rtsp_media_factory_set_protocols (factory, GST_RTSP_LOWER_TRANS_UDP);
   gst_rtsp_media_factory_set_launch (factory,
       "( appsrc name=mysrc ! videoconvert ! x264enc ! rtph264pay name=pay0 pt=96 )");
 
