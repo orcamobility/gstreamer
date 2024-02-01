@@ -253,12 +253,13 @@ gst_x264_enc_add_x264_chroma_format (GstStructure * s,
       g_value_set_string (&fmt, "NV12");
       gst_value_list_append_value (&fmts, &fmt);
     }
-
+#ifdef X264_CSP_I400
     if ((chroma_format == 0 || chroma_format == X264_CSP_I400) &&
         flags & ALLOW_400_8) {
       g_value_set_string (&fmt, "GRAY8");
       gst_value_list_append_value (&fmts, &fmt);
     }
+#endif
   }
 
   if (vtable_10bit) {
@@ -1531,11 +1532,13 @@ gst_x264_enc_parse_options (GstX264Enc * encoder, const gchar * str)
 static gint
 gst_x264_enc_gst_to_x264_video_format (GstVideoFormat format, gint * nplanes)
 {
-  switch (format) {
+  switch (format) { 
+#ifdef X264_CSP_I400
     case GST_VIDEO_FORMAT_GRAY8:
       if (nplanes)
         *nplanes = 1;
       return X264_CSP_I400;
+#endif
     case GST_VIDEO_FORMAT_I420:
     case GST_VIDEO_FORMAT_YV12:
       if (nplanes)
