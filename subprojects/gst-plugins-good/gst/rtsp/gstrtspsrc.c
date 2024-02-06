@@ -7140,9 +7140,9 @@ no_setup:
 /* masks to be kept in sync with the hardcoded protocol order of preference
  * in code below */
 static const guint protocol_masks[] = {
-  GST_RTSP_LOWER_TRANS_UDP,
-  GST_RTSP_LOWER_TRANS_UDP_MCAST,
   GST_RTSP_LOWER_TRANS_TCP,
+  GST_RTSP_LOWER_TRANS_UDP_MCAST,
+  GST_RTSP_LOWER_TRANS_UDP,
   0
 };
 
