@@ -462,8 +462,17 @@ gst_h265_decoder_get_max_dpb_size_from_sps (GstH265Decoder * self,
   guint PicSizeInSamplesY;
   /* Default is the worst case level 6.2 */
   guint32 MaxLumaPS = G_MAXUINT32;
-  const gint MaxDpbPicBuf = 6;
+  gint MaxDpbPicBuf = 6;
   gint max_dpb_size;
+
+  /* A.4.2, maxDpbPicBuf is equal to 6 for all profiles where the value of
+   * sps_curr_pic_ref_enabled_flag is required to be equal to 0 and 7 for all
+   * profiles where the value of sps_curr_pic_ref_enabled_flag is not required
+   * to be equal to 0  */
+  if (sps->sps_scc_extension_flag) {
+    /* sps_curr_pic_ref_enabled_flag could be non-zero only if profile is SCC */
+    MaxDpbPicBuf = 7;
+  }
 
   /* Unknown level */
   if (sps->profile_tier_level.level_idc == 0)
@@ -498,7 +507,25 @@ gst_h265_decoder_get_max_dpb_size_from_sps (GstH265Decoder * self,
   else
     max_dpb_size = MaxDpbPicBuf;
 
-  return MIN (max_dpb_size, 16);
+  max_dpb_size = MIN (max_dpb_size, 16);
+
+  /* MaxDpbSize is not an actual maximum required buffer size.
+   * Instead, it indicates upper bound for other syntax elements, such as
+   * sps_max_dec_pic_buffering_minus1. If this bitstream can satisfy
+   * the requirement, use this as our dpb size */
+  if (sps->max_dec_pic_buffering_minus1[sps->max_sub_layers_minus1] + 1 <=
+      max_dpb_size) {
+    GST_DEBUG_OBJECT (self, "max_dec_pic_buffering_minus1 %d < MaxDpbSize %d",
+        sps->max_dec_pic_buffering_minus1[sps->max_sub_layers_minus1],
+        max_dpb_size);
+    max_dpb_size =
+        sps->max_dec_pic_buffering_minus1[sps->max_sub_layers_minus1] + 1;
+  } else {
+    /* not reliable values, use 16 */
+    max_dpb_size = 16;
+  }
+
+  return max_dpb_size;
 }
 
 static GstFlowReturn
@@ -1770,8 +1797,18 @@ gst_h265_decoder_dpb_init (GstH265Decoder * self, const GstH265Slice * slice,
 {
   GstH265DecoderPrivate *priv = self->priv;
   const GstH265SPS *sps = priv->active_sps;
+  const GstH265PPS *pps = priv->active_pps;
   GstH265Picture *to_output;
   GstFlowReturn ret = GST_FLOW_OK;
+  guint TwoVersionsOfCurrDecPicFlag = 0;
+  /* 7.4.3.3.3 */
+  if (pps->pps_scc_extension_flag &&
+      pps->pps_scc_extension_params.pps_curr_pic_ref_enabled_flag &&
+      (sps->sample_adaptive_offset_enabled_flag ||
+          !pps->deblocking_filter_disabled_flag ||
+          pps->deblocking_filter_override_enabled_flag)) {
+    TwoVersionsOfCurrDecPicFlag = 1;
+  }
 
   /* C 3.2 */
   if (slice->clear_dpb) {
@@ -1793,12 +1830,13 @@ gst_h265_decoder_dpb_init (GstH265Decoder * self, const GstH265Slice * slice,
       }
     }
   } else {
+    guint max_dec_pic_buffering =
+        (sps->max_dec_pic_buffering_minus1[sps->max_sub_layers_minus1] + 1)
+        - TwoVersionsOfCurrDecPicFlag;
     gst_h265_dpb_delete_unused (priv->dpb);
     while (gst_h265_dpb_needs_bump (priv->dpb,
             sps->max_num_reorder_pics[sps->max_sub_layers_minus1],
-            priv->SpsMaxLatencyPictures,
-            sps->max_dec_pic_buffering_minus1[sps->max_sub_layers_minus1] +
-            1)) {
+            priv->SpsMaxLatencyPictures, max_dec_pic_buffering)) {
       to_output = gst_h265_dpb_bump (priv->dpb, FALSE);
 
       /* Something wrong... */
