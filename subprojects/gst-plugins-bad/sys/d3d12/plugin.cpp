@@ -29,6 +29,7 @@
 
 #include <gst/gst.h>
 #include "gstd3d12.h"
+#include "gstd3d12-private.h"
 #include "gstd3d12convert.h"
 #include "gstd3d12download.h"
 #include "gstd3d12upload.h"
@@ -41,6 +42,7 @@
 #include "gstd3d12h264dec.h"
 #include "gstd3d12h264enc.h"
 #include "gstd3d12h265dec.h"
+#include "gstd3d12vp8dec.h"
 #include "gstd3d12vp9dec.h"
 #include "gstd3d12av1dec.h"
 #include <windows.h>
@@ -58,6 +60,12 @@ GST_DEBUG_CATEGORY (gst_d3d12_format_debug);
 GST_DEBUG_CATEGORY (gst_d3d12_utils_debug);
 
 #define GST_CAT_DEFAULT gst_d3d12_debug
+
+static void
+plugin_deinit (gpointer data)
+{
+  gst_d3d12_sync_background_thread ();
+}
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -105,6 +113,8 @@ plugin_init (GstPlugin * plugin)
         GST_RANK_NONE);
     gst_d3d12_h265_dec_register (plugin, device, video_device.Get (),
         GST_RANK_NONE);
+    gst_d3d12_vp8_dec_register (plugin, device, video_device.Get (),
+        GST_RANK_NONE);
     gst_d3d12_vp9_dec_register (plugin, device, video_device.Get (),
         GST_RANK_NONE);
     gst_d3d12_av1_dec_register (plugin, device, video_device.Get (),
@@ -133,6 +143,10 @@ plugin_init (GstPlugin * plugin)
   gst_device_provider_register (plugin,
       "d3d12screencapturedeviceprovider", GST_RANK_PRIMARY,
       GST_TYPE_D3D12_SCREEN_CAPTURE_DEVICE_PROVIDER);
+
+  g_object_set_data_full (G_OBJECT (plugin),
+      "plugin-d3d12-shutdown", (gpointer) "shutdown-data",
+      (GDestroyNotify) plugin_deinit);
 
   return TRUE;
 }
