@@ -1110,10 +1110,9 @@ _gst_pc_thread (GstWebRTCBin * webrtc)
   g_main_context_invoke (webrtc->priv->main_context,
       (GSourceFunc) _unlock_pc_thread, PC_GET_LOCK (webrtc));
 
-  /* Having the thread be the thread default GMainContext will break the
-   * required queue-like ordering (from W3's peerconnection spec) of re-entrant
-   * tasks */
+  g_main_context_push_thread_default (webrtc->priv->main_context);
   g_main_loop_run (webrtc->priv->loop);
+  g_main_context_pop_thread_default (webrtc->priv->main_context);
 
   GST_OBJECT_LOCK (webrtc);
   g_main_context_unref (webrtc->priv->main_context);
@@ -7867,6 +7866,7 @@ jitter_buffer_set_retransmission (SsrcMapItem * item,
 {
   GstWebRTCRTPTransceiver *trans;
   gboolean do_nack;
+  GObjectClass *jb_class;
 
   if (item->media_idx == -1)
     return TRUE;
@@ -7877,13 +7877,23 @@ jitter_buffer_set_retransmission (SsrcMapItem * item,
     return TRUE;
   }
 
+  jb_class = G_OBJECT_GET_CLASS (G_OBJECT (data->jitterbuffer));
   do_nack = WEBRTC_TRANSCEIVER (trans)->do_nack;
-  /* We don't set do-retransmission on rtpbin as we want per-session control */
-  GST_LOG_OBJECT (data->webrtc, "setting do-nack=%s for transceiver %"
-      GST_PTR_FORMAT " with transport %" GST_PTR_FORMAT
-      " rtp session %u ssrc %u", do_nack ? "true" : "false", trans,
-      data->stream, data->stream->session_id, data->ssrc);
-  g_object_set (data->jitterbuffer, "do-retransmission", do_nack, NULL);
+  if (g_object_class_find_property (jb_class, "do-retransmission")) {
+    /* We don't set do-retransmission on rtpbin as we want per-session control */
+    GST_LOG_OBJECT (data->webrtc, "setting do-nack=%s for transceiver %"
+        GST_PTR_FORMAT " with transport %" GST_PTR_FORMAT
+        " rtp session %u ssrc %u", do_nack ? "true" : "false", trans,
+        data->stream, data->stream->session_id, data->ssrc);
+    g_object_set (data->jitterbuffer, "do-retransmission", do_nack, NULL);
+  } else if (do_nack) {
+    GST_WARNING_OBJECT (data->webrtc, "Not setting do-nack for transceiver %"
+        GST_PTR_FORMAT " with transport %" GST_PTR_FORMAT
+        " rtp session %u ssrc %u"
+        " as its jitterbuffer does not have a do-retransmission property",
+        trans, data->stream, data->stream->session_id, data->ssrc);
+  }
+
 
   g_weak_ref_set (&item->rtpjitterbuffer, data->jitterbuffer);
 

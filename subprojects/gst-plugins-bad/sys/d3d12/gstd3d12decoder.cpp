@@ -57,6 +57,8 @@ static const DecoderFormat format_list[] = {
       {DXGI_FORMAT_NV12, DXGI_FORMAT_UNKNOWN,}},
   {GST_DXVA_CODEC_H265, D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN10,
       DXGI_FORMAT_P010},
+  {GST_DXVA_CODEC_VP8, D3D12_VIDEO_DECODE_PROFILE_VP8,
+      {DXGI_FORMAT_NV12, DXGI_FORMAT_UNKNOWN,}},
   {GST_DXVA_CODEC_VP9, D3D12_VIDEO_DECODE_PROFILE_VP9,
       {DXGI_FORMAT_NV12, DXGI_FORMAT_UNKNOWN,}},
   {GST_DXVA_CODEC_VP9, D3D12_VIDEO_DECODE_PROFILE_VP9_10BIT_PROFILE2,
@@ -987,7 +989,7 @@ gst_d3d12_decoder_upload_bitstream (GstD3D12Decoder * self, gpointer data,
     D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer (alloc_size);
     hr = priv->cmd->device->CreateCommittedResource (&heap_prop,
         D3D12_HEAP_FLAG_CREATE_NOT_ZEROED, &desc,
-        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS (&bitstream));
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS (&bitstream));
     if (!gst_d3d12_result (hr, self->device)) {
       GST_ERROR_OBJECT (self, "Failed to create bitstream buffer");
       return FALSE;
@@ -1927,6 +1929,8 @@ gst_d3d12_decoder_get_profiles (const GUID & profile,
     list.push_back ("main");
   } else if (profile == D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN10) {
     list.push_back ("main-10");
+  } else if (profile == D3D12_VIDEO_DECODE_PROFILE_VP8) {
+    /* skip profile field */
   } else if (profile == D3D12_VIDEO_DECODE_PROFILE_VP9) {
     list.push_back ("0");
   } else if (profile == D3D12_VIDEO_DECODE_PROFILE_VP9_10BIT_PROFILE2) {
@@ -2056,6 +2060,9 @@ gst_d3d12_decoder_check_feature_support (GstD3D12Device * device,
           "stream-format=(string) { hev1, hvc1, byte-stream }, "
           "alignment=(string) au";
       break;
+    case GST_DXVA_CODEC_VP8:
+      sink_caps_string = "video/x-vp8";
+      break;
     case GST_DXVA_CODEC_VP9:
       if (profiles.size () > 1) {
         sink_caps_string =
@@ -2080,7 +2087,7 @@ gst_d3d12_decoder_check_feature_support (GstD3D12Device * device,
   }
 
   /* *INDENT-OFF* */
-  if (codec != GST_DXVA_CODEC_VP9) {
+  if (codec != GST_DXVA_CODEC_VP9 && codec != GST_DXVA_CODEC_VP8) {
     if (profiles.size () > 1) {
       profile_string = "{ ";
       bool first = true;

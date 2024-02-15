@@ -1,5 +1,5 @@
 /* GStreamer
- * Copyright (C) <2005,2006> Wim Taymans <wim@fluendo.com>
+ * Copyright (C) 2024 Seungha Yang <seungha@centricular.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -17,15 +17,16 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#ifndef __GST_RTSP_HASH_H__
-#define __GST_RTSP_HASH_H__
+#pragma once
+
+#include "gstd3d12decoder.h"
 
 G_BEGIN_DECLS
 
-void
-gst_rtsp_ext_real_calc_response_and_checksum (char *response, char *chksum,
-    char *challenge);
+void  gst_d3d12_vp8_dec_register (GstPlugin * plugin,
+                                  GstD3D12Device * device,
+                                  ID3D12VideoDevice * video_device,
+                                  guint rank);
 
 G_END_DECLS
 
-#endif /* __GST_RTSP_HASH_H__ */
