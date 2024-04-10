@@ -1,3 +1,14 @@
+# Coram naming convention
+
+For our custom Gstreamer branches, we follow the naming convention:
+
+- `<release-tag>-coram-custom` if we are using a tag as a base.
+- `main-<date_of_commit>-coram-custom` if we are using `main` as a base.
+
+Make sure to always cherry-pick/rebase the custom changes instead of merging
+`main` into our custom branch. This would yield a git history that is very hard
+to read.
+
 # GStreamer
 
 This is GStreamer, a framework for streaming media.
@@ -6,23 +17,23 @@ This is GStreamer, a framework for streaming media.
 
 We have a website at
 
-  https://gstreamer.freedesktop.org
+https://gstreamer.freedesktop.org
 
 Our documentation, including tutorials, API reference and FAQ can be found at
 
-  https://gstreamer.freedesktop.org/documentation/
+https://gstreamer.freedesktop.org/documentation/
 
 You can ask questions on the GStreamer Discourse at
 
-  https://discourse.gstreamer.org/
+https://discourse.gstreamer.org/
 
 We track bugs, feature requests and merge requests (patches) in GitLab at
 
-  https://gitlab.freedesktop.org/gstreamer/
+https://gitlab.freedesktop.org/gstreamer/
 
 You can join us on our Matrix room at
 
-  https://matrix.to/#/#gstreamer:gstreamer.org
+https://matrix.to/#/#gstreamer:gstreamer.org
 
 This repository contains all official modules supported by the GStreamer
 community which can be found in the `subprojects/` directory.
@@ -55,7 +66,6 @@ release](https://github.com/ninja-build/ninja/releases) and put the `ninja`
 binary in your PATH.
 
 You can find [instructions for Windows below](#windows-prerequisites-setup).
-
 
 If you used the official Python installer on macOS instead of the Python
 3 shipped with Xcode, you might need to execute "Install Certificates.command"
@@ -160,26 +170,28 @@ if you have explicitly opted in to allow (A)GPL-licensed dependencies by
 passing `-Dgpl=enabled` to Meson.
 
 List of plugins with (A)GPL-licensed dependencies (non-exhaustive) in gst-plugins-bad:
- - dts (DTS audio decoder plugin)
- - faad (Free AAC audio decoder plugin)
- - iqa (Image quality assessment plugin based on dssim-c)
- - mpeg2enc (MPEG-2 video encoder plugin)
- - mplex (audio/video multiplexer plugin)
- - ofa (Open Fingerprint Architecture library plugin)
- - resindvd (Resin DVD playback plugin)
- - x265 (HEVC/H.265 video encoder plugin)
+
+- dts (DTS audio decoder plugin)
+- faad (Free AAC audio decoder plugin)
+- iqa (Image quality assessment plugin based on dssim-c)
+- mpeg2enc (MPEG-2 video encoder plugin)
+- mplex (audio/video multiplexer plugin)
+- ofa (Open Fingerprint Architecture library plugin)
+- resindvd (Resin DVD playback plugin)
+- x265 (HEVC/H.265 video encoder plugin)
 
 List of plugins with (A)GPL-licensed dependencies (non-exhaustive) in gst-plugins-ugly:
- - a52dec (Dolby Digital (AC-3) audio decoder plugin)
- - cdio (CD audio source plugin based on libcdio)
- - dvdread (DVD video source plugin based on libdvdread)
- - mpeg2dec (MPEG-2 video decoder plugin based on libmpeg2)
- - sidplay (Commodore 64 audio decoder plugin based on libsidplay)
- - x264 (H.264 video encoder plugin based on libx264)
+
+- a52dec (Dolby Digital (AC-3) audio decoder plugin)
+- cdio (CD audio source plugin based on libcdio)
+- dvdread (DVD video source plugin based on libdvdread)
+- mpeg2dec (MPEG-2 video decoder plugin based on libmpeg2)
+- sidplay (Commodore 64 audio decoder plugin based on libsidplay)
+- x264 (H.264 video encoder plugin based on libx264)
 
 ### Static build
 
-Since *1.18.0*, when doing a static build using `--default-library=static`,
+Since _1.18.0_, when doing a static build using `--default-library=static`,
 a shared library `gstreamer-full-1.0`, in addition to a package config file,
 will be produced and includes all enabled GStreamer plugins and libraries.
 A list of libraries that needs to be exposed in `gstreamer-full-1.0`
@@ -190,11 +202,11 @@ glib-2.0, gobject-2.0 and gstreamer-1.0 are always included.
 meson --default-library=static -Dgst-full-libraries=app,video builddir
 ```
 
-GStreamer *1.18* requires applications using gstreamer-full-1.0 to initialize
+GStreamer _1.18_ requires applications using gstreamer-full-1.0 to initialize
 static plugins by calling `gst_init_static_plugins()` after `gst_init()`. That
 function is defined in `gst/gstinitstaticplugins.h` header file.
 
-Since *1.20.0*, `gst_init_static_plugins()` is called automatically by
+Since _1.20.0_, `gst_init_static_plugins()` is called automatically by
 `gst_init()` and applications don't have to call it manually any more.
 The header file has been removed from public API.
 
@@ -206,7 +218,7 @@ and so, reduce the total library size. A default script
 `gstreamer-full-default.map` declares only glib/gstreamer symbols as public.
 
 One can use the `gst-full-plugins` option to pass a list of plugins to be
-registered in the `gstreamer-full` library. The default value is '*'
+registered in the `gstreamer-full` library. The default value is '\*'
 which means that all the plugins selected during the build process will be
 registered statically.
 An empty value will prevent any plugins to be registered.
@@ -227,17 +239,17 @@ and are ',' separated.
 
 As an example:
 
- * `-Dgst-full-plugins=coreelements;typefindfunctions;alsa;pbtypes`:
- Enable only `coreelements`, `typefindfunctions`, `alsa`, `pbtypes` plugins.
- * `-Dgst-full-elements=coreelements:filesrc,fakesink,identity;alsa:alsasrc`:
- Enable only `filesrc`, `identity` and `fakesink` elements from `coreelements`
- plugin and `alsasrc` element from `alsa` plugin.
- * `-Dgst-full-typefind-functions=typefindfunctions:wav,flv`:
- Enable only typefind func `wav` and `flv` from `typefindfunctions`
- * `-Dgst-full-device-providers=alsa:alsadeviceprovider`:
- Enable `alsadeviceprovider` from `alsa` plugin.
- * `-Dgst-full-dynamic-types=pbtypes:video_multiview_flagset`:
- Enable `video_multiview_flagset` from `pbtypes`.
+- `-Dgst-full-plugins=coreelements;typefindfunctions;alsa;pbtypes`:
+  Enable only `coreelements`, `typefindfunctions`, `alsa`, `pbtypes` plugins.
+- `-Dgst-full-elements=coreelements:filesrc,fakesink,identity;alsa:alsasrc`:
+  Enable only `filesrc`, `identity` and `fakesink` elements from `coreelements`
+  plugin and `alsasrc` element from `alsa` plugin.
+- `-Dgst-full-typefind-functions=typefindfunctions:wav,flv`:
+  Enable only typefind func `wav` and `flv` from `typefindfunctions`
+- `-Dgst-full-device-providers=alsa:alsadeviceprovider`:
+  Enable `alsadeviceprovider` from `alsa` plugin.
+- `-Dgst-full-dynamic-types=pbtypes:video_multiview_flagset`:
+  Enable `video_multiview_flagset` from `pbtypes`.
 
 All features from the `playback` plugin will be enabled and the other plugins
 will be restricted to the specific features requested.
@@ -251,13 +263,12 @@ in the final gstreamer-full library.
 This is an experimental feature, backward incompatible changes could still be
 made in the future.
 Only linux-like platforms are currently well supported when Windows, MSVC
-and MinGW, should be considered as *experimental* as the symbols export
+and MinGW, should be considered as _experimental_ as the symbols export
 is still under discussion.
-
 
 #### Full-static build
 
-Since *1.24.0*, it is also possible to link an application with GStreamer
+Since _1.24.0_, it is also possible to link an application with GStreamer
 statically. It means that all the gstreamer libraries will be linked within
 your library or application. However, it is important to note that even though
 the `gstreamer-full` library can be statically built into the application,
@@ -272,9 +283,8 @@ Your application can now check the `gstreamer-full` dependency within meson or
 with the package config file.
 In both case, the application can rely on the `gstreamer-full-1.0.pc` file
 generated during the build process to retrieve all its dependencies.
-In that configuration, the *features* selected during the build configuration
+In that configuration, the _features_ selected during the build configuration
 will be automatically registered during the call of `gst_init()`.
-
 
 ### Building documentation
 
@@ -398,7 +408,6 @@ Note that the installed files have `RPATH` stripped, so you will need to set
 `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, or `PATH` as appropriate for your
 platform for things to work.
 
-
 ## Add information about GStreamer development environment in your prompt line
 
 ### Bash prompt
@@ -503,7 +512,7 @@ meson setup --vsenv builddir
 
 ##### On fedora x64
 
-``` sh
+```sh
 sudo dnf install mingw64-gcc mingw64-gcc-c++ mingw64-pkg-config mingw64-winpthreads wine
 ```
 
@@ -514,7 +523,7 @@ FIXME: Figure out what needs to be installed on other distros
 This simplifies the process and allows us to use the cross files
 defined in meson itself.
 
-``` sh
+```sh
 git clone https://github.com/mesonbuild/meson.git
 ```
 
@@ -528,7 +537,7 @@ meson/meson.py $BUILDDIR --cross-file meson/cross/linux-mingw-w64-64bit.txt -Dgs
 meson/meson.py install -C $BUILDDIR/
 ```
 
-> __NOTE__: You should use `meson install -C $BUILDDIR`  each time you make a change
+> **NOTE**: You should use `meson install -C $BUILDDIR` each time you make a change
 > instead of the usual `meson compile -C $BUILDDIR` as this is not in the
 > development environment.
 
