@@ -28,6 +28,8 @@ nvcustomunixfd_plugin = library('gstnvcustomunixfd',
   include_directories: [configinc],
   dependencies : [gstbase_dep, gstallocators_dep, gstvideo_dep,
                   gio_dep, gio_unix_dep, nvbufsurface_lib, nvbufsurftransform_lib],
+  install : true,
+  install_dir : plugins_install_dir,
 )
 
 plugins += [nvcustomunixfd_plugin]
