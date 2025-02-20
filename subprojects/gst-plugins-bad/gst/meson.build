@@ -13,8 +13,12 @@ foreach plugin : ['accurip', 'adpcmdec', 'adpcmenc', 'aiff', 'asfmux',
                   'segmentclip', 'siren', 'smooth', 'speed', 'subenc', 'switchbin',
                   'timecode', 'transcode', 'unixfd', 'videofilters',
                   'videoframe_audiolevel', 'videoparsers', 'videosignal',
-                  'vmnc', 'y4m', 'nvcustomunixfd']
+                  'vmnc', 'y4m']
   if not get_option(plugin).disabled()
     subdir(plugin)
   endif
 endforeach
+
+if not get_option('nvcustomunixfd').disabled()
+  subdir('nvcustomunixfd')
+endif
