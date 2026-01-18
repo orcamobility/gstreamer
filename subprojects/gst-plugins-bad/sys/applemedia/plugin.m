@@ -25,10 +25,6 @@
 #include <Foundation/Foundation.h>
 #include "corevideomemory.h"
 
-#if TARGET_OS_IOS
-#include "iosassetsrc.h"
-#endif
-
 #if TARGET_OS_IOS || TARGET_OS_TV
 #include "iosglmemory.h"
 #endif
@@ -66,10 +62,6 @@ plugin_init (GstPlugin * plugin)
 
 #if TARGET_OS_IOS || TARGET_OS_TV
   gst_ios_gl_memory_init ();
-#endif
-
-#if TARGET_OS_IOS
-  res |= GST_ELEMENT_REGISTER (iosassetsrc, plugin);
 #endif
 
 #if TARGET_OS_OSX
