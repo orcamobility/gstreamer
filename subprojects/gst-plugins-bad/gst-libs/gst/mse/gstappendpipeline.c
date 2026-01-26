@@ -433,6 +433,28 @@ error:
   return GST_PAD_PROBE_HANDLED;
 }
 
+static GstPadProbeReturn
+offset_probe (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
+{
+  static gint64 offset;
+  GstAppendPipeline *self = GST_APPEND_PIPELINE (user_data);
+  GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
+
+  if (!GST_BUFFER_PTS_IS_VALID (buffer)) {
+    GST_INFO_OBJECT (self, "Buffer %p has invalid pts, ignoring", buffer);
+    return GST_PAD_PROBE_OK;
+  }
+
+  if (offset == 0) {
+    offset = GST_BUFFER_DURATION (buffer) - GST_BUFFER_PTS (buffer);
+    GST_INFO_OBJECT (self, "Setting pts/dts offset");
+  }
+
+  GST_BUFFER_PTS (buffer) += offset;
+  GST_BUFFER_DTS (buffer) += offset;
+  return GST_PAD_PROBE_OK;
+}
+
 static AddTrackResult
 add_track (GstAppendPipeline * self, GstPad * pad, GstStream * stream,
     GstCaps * caps, Track * added_track)
@@ -571,6 +593,7 @@ static void
 on_pad_added (GstElement * parsebin, GstPad * pad, gpointer user_data)
 {
   GstAppendPipeline *self = GST_APPEND_PIPELINE (user_data);
+  gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER, offset_probe, NULL, NULL);
   process_init_segment_track (pad, self);
   process_init_segment (self);
 }
