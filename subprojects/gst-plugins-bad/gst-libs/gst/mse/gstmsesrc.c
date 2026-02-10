@@ -967,6 +967,7 @@ static void
 pad_task (GstMseSrcPad * pad)
 {
   GstMseSrc *self = NULL;
+  GstMiniObject *object = NULL;
   gboolean flushing = await_pad_linked_or_flushing (pad);
   if (flushing) {
     GST_TRACE_OBJECT (pad, "pad is flushing");
@@ -977,7 +978,7 @@ pad_task (GstMseSrcPad * pad)
 
   GstMediaSourceTrack *track = pad->track;
 
-  GstMiniObject *object = gst_media_source_track_pop (track);
+  object = gst_media_source_track_pop (track);
 
   if (object == NULL) {
     GST_DEBUG_OBJECT (pad, "nothing was popped from track, must be flushing");
@@ -1034,7 +1035,7 @@ pad_task (GstMseSrcPad * pad)
   }
 
   if (GST_IS_SAMPLE (object)) {
-    GstSample *sample = GST_SAMPLE (object);
+    GstSample *sample = GST_SAMPLE (g_steal_pointer (&object));
     GstCaps *sample_caps = gst_sample_get_caps (sample);
 
     if (!gst_caps_is_equal (pad->most_recent_caps, sample_caps)) {
@@ -1042,12 +1043,14 @@ pad_task (GstMseSrcPad * pad)
       GstEvent *event = gst_event_new_caps (gst_caps_ref (sample_caps));
       if (!gst_pad_push_event (GST_PAD (pad), event)) {
         GST_ERROR_OBJECT (pad, "failed to push new caps");
+        gst_clear_sample (&sample);
         goto pause;
       }
       GST_TRACE_OBJECT (pad, "new caps %" GST_PTR_FORMAT, sample_caps);
     }
 
     GstBuffer *buffer = gst_buffer_copy (gst_sample_get_buffer (sample));
+    gst_clear_sample (&sample);
     if (GST_BUFFER_DTS_IS_VALID (buffer)) {
       GstClockTime duration =
           GST_BUFFER_DURATION_IS_VALID (buffer) ? GST_BUFFER_DURATION (buffer) :
@@ -1091,6 +1094,8 @@ pad_task (GstMseSrcPad * pad)
     g_assert_not_reached ();
   }
 
+out:
+  gst_clear_mini_object (&object);
   gst_clear_object (&self);
   return;
 
@@ -1098,7 +1103,7 @@ pause:
   if (!g_atomic_int_get (&pad->flushing)) {
     gst_pad_pause_task (GST_PAD (pad));
   }
-  gst_clear_object (&self);
+  goto out;
 }
 
 static gboolean
