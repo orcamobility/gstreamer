@@ -395,8 +395,6 @@ new_appsink (GstAppendPipeline * self, GstStreamType type)
 static GstPadProbeReturn
 black_hole_probe (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
 {
-  g_return_val_if_fail (GST_PAD_PROBE_INFO_TYPE (info) &
-      GST_PAD_PROBE_TYPE_BUFFER, GST_PAD_PROBE_DROP);
   return GST_PAD_PROBE_DROP;
 }
 
@@ -451,8 +449,8 @@ add_track (GstAppendPipeline * self, GstPad * pad, GstStream * stream,
     default:{
       GST_DEBUG_OBJECT (self, "unexpected caps %" GST_PTR_FORMAT
           ", using black hole probe", caps);
-      gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER, black_hole_probe, self,
-          NULL);
+      gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_DATA_DOWNSTREAM,
+          black_hole_probe, self, NULL);
       return IGNORED;
     }
   }
