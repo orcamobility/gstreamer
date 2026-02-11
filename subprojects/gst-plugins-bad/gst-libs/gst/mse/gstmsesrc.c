@@ -1040,7 +1040,7 @@ pad_task (GstMseSrcPad * pad)
 
     if (!gst_caps_is_equal (pad->most_recent_caps, sample_caps)) {
       gst_caps_replace (&pad->most_recent_caps, sample_caps);
-      GstEvent *event = gst_event_new_caps (gst_caps_ref (sample_caps));
+      GstEvent *event = gst_event_new_caps (sample_caps);
       if (!gst_pad_push_event (GST_PAD (pad), event)) {
         GST_ERROR_OBJECT (pad, "failed to push new caps");
         gst_clear_sample (&sample);
@@ -1364,8 +1364,9 @@ update_ready_state_for_init_segment (GstMseSrc * self)
     all_received_init_segment &= gst_source_buffer_has_init_segment (buf);
     gst_object_unref (buf);
   }
+  gst_object_unref (buffers);
   if (!all_received_init_segment) {
-    return;
+    goto done;
   }
   set_ready_state (self, MAX (self->ready_state,
           GST_MSE_SRC_READY_STATE_HAVE_METADATA));

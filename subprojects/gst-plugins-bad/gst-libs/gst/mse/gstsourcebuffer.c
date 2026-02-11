@@ -402,6 +402,7 @@ gst_source_buffer_finalize (GObject * object)
   g_hash_table_unref (self->track_buffers);
   g_hash_table_unref (self->track_feeds);
   g_mutex_clear (&self->tracks_lock);
+  g_cond_clear (&self->pending_data_cond);
 
   G_OBJECT_CLASS (gst_source_buffer_parent_class)->finalize (object);
 }
@@ -759,6 +760,7 @@ add_track_feed_unlocked (GstMediaSourceTrack * track,
 static void
 clear_track_feed (TrackFeedTask * feed)
 {
+  stop_track_feed (feed);
   gst_object_unref (feed->task);
   g_rec_mutex_clear (&feed->lock);
   gst_object_unref (feed->track);
@@ -1385,6 +1387,7 @@ get_buffered_unlocked (GstSourceBuffer * self)
         ((GstMediaSourceRange *) buffered->data) + buffered->len,
         (GstMediaSourceRange *) current_ranges->data,
         ((GstMediaSourceRange *) current_ranges->data) + current_ranges->len);
+    g_array_unref (current_ranges);
     g_array_unref (buffered);
     buffered = intersection;
   }

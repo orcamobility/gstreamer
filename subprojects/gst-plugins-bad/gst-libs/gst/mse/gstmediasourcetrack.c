@@ -364,7 +364,7 @@ gst_media_source_track_push (GstMediaSourceTrack * self, GstSample * sample)
 static inline GstDataQueueItem *
 wrap_eos (void)
 {
-  GstEvent *event = gst_event_ref (gst_event_new_eos ());
+  GstEvent *event = gst_event_new_eos ();
 
   GstDataQueueItem item = {
     .object = GST_MINI_OBJECT (event),
