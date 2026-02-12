@@ -1524,6 +1524,9 @@ create_format_description_from_codec_data (GstVtdec * vtdec,
         gst_buffer_unmap (vtdec->av1_sequence_header_obu, &seq_map);
       } else {
         GST_ERROR_OBJECT (vtdec, "Missing sequence header OBU");
+        gst_buffer_unmap (codec_data, &map);
+        CFRelease (atoms);
+        CFRelease (extensions);
         return NULL;
       }
     } else {
