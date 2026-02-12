@@ -1886,7 +1886,12 @@ track_feed_task (TrackFeedTask * feed)
   }
   g_clear_pointer (&acc.processed_samples, g_hash_table_unref);
   g_value_unset (&start_dts_value);
-  gst_clear_object (&self);
+  /* Don't unref directly from the task thread. If this is the last ref,
+   * it triggers dispose which calls gst_task_join() on this same task,
+   * deadlocking. Defer the unref to the main loop where the join is safe
+   * because the task will have already exited by then. */
+  g_idle_add_once ((GSourceOnceFunc) gst_object_unref, self);
+  self = NULL;
 }
 
 static void
