@@ -1292,9 +1292,9 @@ reacquire:
   err =
       priv->AcquireNextImageKHR (swapper->device->device,
       priv->swap_chain, -1, acquire_semaphore, VK_NULL_HANDLE, &swap_idx);
-  /* TODO: Deal with the VK_SUBOPTIMAL_KHR and VK_ERROR_OUT_OF_DATE_KHR */
-  if (err == VK_ERROR_OUT_OF_DATE_KHR) {
-    GST_DEBUG_OBJECT (swapper, "out of date frame acquired");
+  if (err == VK_ERROR_OUT_OF_DATE_KHR || err == VK_SUBOPTIMAL_KHR) {
+    GST_DEBUG_OBJECT (swapper, "swapchain is %s, recreating",
+        err == VK_ERROR_OUT_OF_DATE_KHR ? "out of date" : "suboptimal");
 
     vkDestroySemaphore (swapper->device->device, acquire_semaphore, NULL);
     acquire_semaphore = VK_NULL_HANDLE;
