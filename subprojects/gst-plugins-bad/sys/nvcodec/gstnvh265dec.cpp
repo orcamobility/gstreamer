@@ -645,8 +645,14 @@ gst_nv_h265_dec_new_sequence (GstH265Decoder * decoder, const GstH265SPS * sps,
   if (modified || !gst_nv_decoder_is_configured (self->decoder)) {
     GstVideoInfo info;
 
-    gst_video_info_set_format (&info,
-        self->out_format, self->width, self->height);
+    if (!gst_video_info_set_format (&info,
+            self->out_format, self->width, self->height)) {
+      GST_ERROR_OBJECT (self,
+          "Failed to set video info, format %s, width %u, height %u",
+          gst_video_format_to_string (self->out_format), self->width,
+          self->height);
+      return GST_FLOW_NOT_NEGOTIATED;
+    }
 
     self->max_dpb_size = max_dpb_size;
     max_width = gst_nv_decoder_get_max_output_size (self->coded_width,

@@ -298,6 +298,21 @@ gst_nv_decoder_configure (GstNvDecoder * decoder, cudaVideoCodec codec,
   gst_clear_object (&decoder->converter);
 
   format = GST_VIDEO_INFO_FORMAT (info);
+  if (format == GST_VIDEO_FORMAT_UNKNOWN) {
+    gchar *trace = gst_debug_get_stack_trace (GST_STACK_TRACE_SHOW_FULL);
+    GST_ERROR_OBJECT (decoder,
+        "Invalid video info with unknown format. "
+        "codec %d, coded size %dx%d, "
+        "bit depth %u, pool size %u, alloc_aux_frame %d, "
+        "num_output_surfaces %u, init_max %ux%u, stack trace: %s",
+        codec, coded_width, coded_height,
+        coded_bitdepth, pool_size, alloc_aux_frame,
+        num_output_surfaces, init_max_width, init_max_height,
+        GST_STR_NULL (trace));
+    g_free (trace);
+    return FALSE;
+  }
+
   if (decoder->info.finfo)
     prev_format = GST_VIDEO_INFO_FORMAT (&decoder->info);
 
