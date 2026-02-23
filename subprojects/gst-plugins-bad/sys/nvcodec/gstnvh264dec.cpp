@@ -633,7 +633,15 @@ gst_nv_h264_dec_new_sequence (GstH264Decoder * decoder, const GstH264SPS * sps,
       return GST_FLOW_NOT_NEGOTIATED;
     }
 
-    gst_video_info_set_format (&info, out_format, self->width, self->height);
+    if (!gst_video_info_set_format (&info, out_format, self->width,
+            self->height)) {
+      GST_WARNING_OBJECT (self,
+          "Failed to set video info, format %s, width %u, height %u, "
+          "skipping reconfiguration and waiting for valid SPS",
+          gst_video_format_to_string (out_format), self->width, self->height);
+      return GST_FLOW_OK;
+    }
+
     if (self->interlaced)
       GST_VIDEO_INFO_INTERLACE_MODE (&info) = GST_VIDEO_INTERLACE_MODE_MIXED;
 
