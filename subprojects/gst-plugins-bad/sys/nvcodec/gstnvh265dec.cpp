@@ -648,11 +648,10 @@ gst_nv_h265_dec_new_sequence (GstH265Decoder * decoder, const GstH265SPS * sps,
     if (!gst_video_info_set_format (&info,
             self->out_format, self->width, self->height)) {
       GST_WARNING_OBJECT (self,
-          "Failed to set video info, format %s, width %u, height %u, "
-          "skipping reconfiguration and waiting for valid SPS",
+          "Failed to set video info, format %s, width %u, height %u",
           gst_video_format_to_string (self->out_format), self->width,
           self->height);
-      return GST_FLOW_OK;
+      return GST_FLOW_ERROR;
     }
 
     self->max_dpb_size = max_dpb_size;

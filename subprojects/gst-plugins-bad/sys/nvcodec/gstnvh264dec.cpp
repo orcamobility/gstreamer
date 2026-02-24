@@ -636,10 +636,9 @@ gst_nv_h264_dec_new_sequence (GstH264Decoder * decoder, const GstH264SPS * sps,
     if (!gst_video_info_set_format (&info, out_format, self->width,
             self->height)) {
       GST_WARNING_OBJECT (self,
-          "Failed to set video info, format %s, width %u, height %u, "
-          "skipping reconfiguration and waiting for valid SPS",
+          "Failed to set video info, format %s, width %u, height %u",
           gst_video_format_to_string (out_format), self->width, self->height);
-      return GST_FLOW_OK;
+      return GST_FLOW_ERROR;
     }
 
     if (self->interlaced)
