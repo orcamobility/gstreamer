@@ -2,5 +2,5 @@
 directory=gst-plugins-rs
 url=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
 push-url=git@gitlab.freedesktop.org:gstreamer/gst-plugins-rs.git
-# 2025-01-15, main branch
-revision=8e62e54cc991919f26101bbf6e814e3d6858239c
+# 2025-04-14, main branch
+revision=800e4a579f25e9364161f81145ebde26a4405e5b
