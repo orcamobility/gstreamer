@@ -317,6 +317,10 @@ struct _GstDebugMessage
 
   /* heap-allocated write area for short names */
   gchar tmp_id[32];
+
+  /* Inline buffer @message is formatted into; vasnprintf falls back to malloc
+   * only if the result doesn't fit. */
+  gchar inline_buf[1024];
 };
 
 /* list of all name/level pairs from --gst-debug and GST_DEBUG */
@@ -624,7 +628,9 @@ gst_debug_log_full_valist (GstDebugCategory * category, GstDebugLevel level,
     entry->func (category, level, file, function, line, object, &message,
         entry->user_data);
   }
-  g_free (message.message);
+
+  if (message.message != message.inline_buf)
+    g_free (message.message);
   if (message.free_object_id)
     g_free (message.object_id);
   va_end (message.arguments);
@@ -788,8 +794,8 @@ gst_debug_message_get (GstDebugMessage * message)
   if (message->message == NULL) {
     int len;
 
-    len = __gst_vasprintf (&message->message, message->format,
-        message->arguments);
+    len = __gst_vasprintf_buf (&message->message, message->inline_buf,
+        sizeof (message->inline_buf), message->format, message->arguments);
 
     if (len < 0)
       message->message = NULL;
