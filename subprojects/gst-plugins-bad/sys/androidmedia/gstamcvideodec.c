@@ -184,7 +184,7 @@ _attach_mem_to_context (GstGLContext * context, GstAmcVideoDec * self)
 }
 
 static void
-_dettach_mem_from_context (GstGLContext * context, GstAmcVideoDec * self)
+_detach_mem_from_context (GstGLContext * context, GstAmcVideoDec * self)
 {
   if (self->surface) {
     guint tex_id = self->oes_mem ? self->oes_mem->tex_id : 0;
@@ -488,7 +488,7 @@ gst_amc_video_dec_close (GstVideoDecoder * decoder)
 
     if (self->gl_mem_attached)
       gst_gl_context_thread_add (self->gl_context,
-          (GstGLContextThreadFunc) _dettach_mem_from_context, self);
+          (GstGLContextThreadFunc) _detach_mem_from_context, self);
   }
   self->gl_pushed_frame_count = 0;
   self->gl_ready_frame_count = 0;
