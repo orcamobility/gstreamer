@@ -130,8 +130,6 @@ gst_nv_enc_task_unref (GstNvEncTask * task)
   gst_mini_object_unref (GST_MINI_OBJECT_CAST (task));
 }
 
-const gchar * nvenc_status_to_string (NVENCSTATUS status);
-
 G_END_DECLS
 
 enum GstNvEncCodec
