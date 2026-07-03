@@ -93,6 +93,8 @@ gboolean                gst_nvenc_have_set_io_cuda_streams (void);
 gboolean                gst_nvenc_load_library (guint * api_major_ver,
                                                 guint * api_minor_ver);
 
+const gchar *           nvenc_status_to_string (NVENCSTATUS status);
+
 G_END_DECLS
 
 #endif /* __GST_NVENC_H_INCLUDED__ */

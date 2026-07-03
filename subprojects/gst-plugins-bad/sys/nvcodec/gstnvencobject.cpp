@@ -172,7 +172,8 @@ GstNvEncObject::CreateInstance (GstElement * client, GstObject * device,
 
   status = NvEncOpenEncodeSessionEx (params, &session);
   if (!NVENC_IS_SUCCESS (status, nullptr)) {
-    GST_ERROR_OBJECT (device, "NvEncOpenEncodeSessionEx failed");
+    GST_ERROR_OBJECT (device, "NvEncOpenEncodeSessionEx failed: 0x%x (%s)",
+        (guint) status, nvenc_status_to_string (status));
     /* Report error to abort if GST_CUDA_CRITICAL_ERRORS is configured */
     gst_cuda_result (CUDA_ERROR_NO_DEVICE);
     return nullptr;
