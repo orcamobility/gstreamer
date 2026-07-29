@@ -86,6 +86,8 @@ struct _GstRtpH265Depay
   /* downstream allocator */
   GstAllocator *allocator;
   GstAllocationParams params;
+
+  guint max_fragmentation_unit_size;
 };
 
 struct _GstRtpH265DepayClass

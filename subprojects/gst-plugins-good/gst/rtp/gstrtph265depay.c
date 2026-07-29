@@ -39,6 +39,14 @@ GST_DEBUG_CATEGORY_STATIC (rtph265depay_debug);
  * expressed a restriction or preference via caps */
 #define DEFAULT_STREAM_FORMAT GST_H265_STREAM_FORMAT_BYTESTREAM
 #define DEFAULT_ACCESS_UNIT   FALSE
+#define DEFAULT_MAX_FRAGMENTATION_UNIT_SIZE (32 * 1024 * 1024)
+
+enum
+{
+  PROP_0,
+  PROP_MAX_FRAGMENTATION_UNIT_SIZE,
+};
+
 
 /* 3 zero bytes syncword */
 static const guint8 sync_bytes[] = { 0, 0, 0, 1 };
@@ -119,6 +127,38 @@ static void gst_rtp_h265_depay_push (GstRtpH265Depay * rtph265depay,
     GstBuffer * outbuf, gboolean keyframe, GstClockTime timestamp,
     gboolean marker);
 
+static void
+gst_rtp_h265_depay_set_property (GObject * object, guint prop_id,
+    const GValue * value, GParamSpec * pspec)
+{
+  GstRtpH265Depay *self = GST_RTP_H265_DEPAY (object);
+
+  switch (prop_id) {
+    case PROP_MAX_FRAGMENTATION_UNIT_SIZE:
+      self->max_fragmentation_unit_size = g_value_get_uint (value);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
+gst_rtp_h265_depay_get_property (GObject * object, guint prop_id,
+    GValue * value, GParamSpec * pspec)
+{
+  GstRtpH265Depay *self = GST_RTP_H265_DEPAY (object);
+
+  switch (prop_id) {
+    case PROP_MAX_FRAGMENTATION_UNIT_SIZE:
+      g_value_set_uint (value, self->max_fragmentation_unit_size);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
 
 static void
 gst_rtp_h265_depay_class_init (GstRtpH265DepayClass * klass)
@@ -132,6 +172,26 @@ gst_rtp_h265_depay_class_init (GstRtpH265DepayClass * klass)
   gstrtpbasedepayload_class = (GstRTPBaseDepayloadClass *) klass;
 
   gobject_class->finalize = gst_rtp_h265_depay_finalize;
+  gobject_class->set_property = gst_rtp_h265_depay_set_property;
+  gobject_class->get_property = gst_rtp_h265_depay_get_property;
+
+  /**
+   * GstRtpH265Depay:max-fragmentation-unit-size:
+   *
+   * Maximum size in bytes for a fragmentation unit. Larger units
+   * will be dropped to prevent excessive memory usage.
+   *
+   * Use 0 for automatic.
+   *
+   * Since: 1.28.6
+   */
+  g_object_class_install_property (gobject_class,
+      PROP_MAX_FRAGMENTATION_UNIT_SIZE,
+      g_param_spec_uint ("max-fragmentation-unit-size",
+          "Max Fragmentation Unit Size",
+          "Maximum size in bytes for a fragmentation unit (0 = auto)", 0,
+          G_MAXUINT, DEFAULT_MAX_FRAGMENTATION_UNIT_SIZE,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_add_static_pad_template (gstelement_class,
       &gst_rtp_h265_depay_src_template);
@@ -168,6 +228,8 @@ gst_rtp_h265_depay_init (GstRtpH265Depay * rtph265depay)
       (GDestroyNotify) gst_buffer_unref);
   rtph265depay->pps = g_ptr_array_new_with_free_func (
       (GDestroyNotify) gst_buffer_unref);
+  rtph265depay->max_fragmentation_unit_size =
+      DEFAULT_MAX_FRAGMENTATION_UNIT_SIZE;
 }
 
 static void
@@ -1525,6 +1587,17 @@ gst_rtp_h265_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
         if (E) {
           gst_rtp_h265_finish_fragmentation_unit (rtph265depay);
           GST_DEBUG_OBJECT (rtph265depay, "End of Fragmentation Unit");
+        } else {
+          guint limit = rtph265depay->max_fragmentation_unit_size ?
+              rtph265depay->max_fragmentation_unit_size :
+              DEFAULT_MAX_FRAGMENTATION_UNIT_SIZE;
+          if (gst_adapter_available (rtph265depay->adapter) > limit) {
+            GST_WARNING_OBJECT (rtph265depay,
+                "Too big (> %u bytes) fragmentation unit, dropping.", limit);
+            gst_rtp_base_depayload_flush (depayload, FALSE);
+            gst_adapter_clear (rtph265depay->adapter);
+            return NULL;
+          }
         }
         break;
       }
