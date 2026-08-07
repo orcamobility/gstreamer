@@ -4,3 +4,4 @@ url=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
 push-url=git@gitlab.freedesktop.org:gstreamer/gst-plugins-rs.git
 # 2025-05-21, main branch
 revision=c3740cd6a9b24495ba128a4aabe82532cef3ff9e
+diff_files = gst-plugins-rs/0001-fmp4mux-fix-deadlock-when-all-streams-have-late-GOPs.patch
