@@ -4,4 +4,4 @@ url=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
 push-url=git@gitlab.freedesktop.org:gstreamer/gst-plugins-rs.git
 # 2025-05-21, main branch
 revision=c3740cd6a9b24495ba128a4aabe82532cef3ff9e
-diff_files = gst-plugins-rs/0001-fmp4mux-bound-the-first-stream-NEED_DATA-wait.patch
+diff_files = gst-plugins-rs/0001-fmp4mux-do-not-skip-the-first-stream-on-a-late-GOP.patch
