@@ -1,19 +1,20 @@
 From: Coram Engineering <eng@coram.ai>
-Subject: [PATCH] fmp4mux: do not skip the first stream on a late GOP
+Subject: [PATCH] fmp4mux: don't skip the first stream on a late GOP
 
 c3740cd6 ("fmp4mux: Fix handling of stream with late single GOP") added
-`late_gop` to the early return of drain_buffers_one_stream() so that a stream
-whose queued GOPs all start after the current fragment end is skipped and the
-*other* streams can still be drained.
+`late_gop` to the early return of drain_buffers_one_stream() so a stream whose
+queued GOPs all start after the current fragment end is skipped and the *other*
+streams can still be drained.
 
-Applying that to the first stream is fatal. The first stream is the one that
-decides the chunk end PTS. If it drains nothing, drain() finds no last GOP,
-`stream_after_chunk` is evaluated against `chunk_start_pts + chunk_duration`
-(a later boundary than the `fragment_end_pts` used to declare the stream
-late), so the escape does not apply and drain() returns
-AGGREGATOR_FLOW_NEED_DATA. No chunk is started, no fragment is started,
-nothing is pushed, and the input queue grows without bound. `late_gop` is
-cleared and re-armed on the next cycle, so this repeats forever.
+Applying that to the first stream deadlocks the muxer. The first stream decides
+the chunk end PTS. When it drains nothing, drain() finds no last GOP and
+evaluates `stream_after_chunk` against `chunk_start_pts + chunk_duration` -- a
+later boundary than the `fragment_end_pts` used to declare the stream late -- so
+the escape does not apply and drain() returns AGGREGATOR_FLOW_NEED_DATA. No
+chunk is started, no fragment is started, nothing is pushed downstream, and the
+input queue grows without bound. `late_gop` is cleared and re-armed by the fill
+check on the next cycle, so this repeats indefinitely and the stream never
+recovers.
 
 Before c3740cd6 the early return fired only on an empty queue, so the loop
 always ran and the first stream reached its dedicated fallback:
@@ -21,51 +22,50 @@ always ran and the first stream reached its dedicated fallback:
     (gop.final_end_pts || ...) && (gop.end_pts <= dequeue_end_pts
         || (gops.is_empty() && chunk_end_pts.is_none()))
 
-whose comment describes precisely this case ("no GOPs were dequeued yet and
-this is the first stream ... if no GOP ends between the last chunk of the
-fragment and the fragment duration"). That fallback drained the late GOP and
-output kept flowing.
+whose comment describes precisely this situation ("no GOPs were dequeued yet and
+this is the first stream ... would happen if no GOP ends between the last chunk
+of the fragment and the fragment duration"). That fallback drained the late GOP
+and output kept flowing.
 
-Restrict the late-GOP skip to non-first streams so the first stream reaches
-that fallback again. The assertion c3740cd6 guards is already satisfied in
-chunk mode via `settings.chunk_duration.is_some()`, so the panic fix is
-unaffected.
+Restrict the late-GOP skip to non-first streams so the first stream reaches that
+fallback again. The assertion c3740cd6 guards is evaluated before this and still
+sees the original `late_gop`, and is in any case already satisfied in chunk mode
+via `settings.chunk_duration.is_some()`, so the panic fix is unaffected.
 
-Observed on a live H.264+AAC pipeline (fragment-duration=2s,
+Reproduced on a live H.264 + AAC pipeline (fragment-duration=2s,
 chunk-duration=100ms) where a GOP began 36.76us after the fragment end: 373
-drains entered in 60s, 385 NEED_DATA returns, zero chunks or fragments
-started, and over three minutes of GOPs queued and still growing.
+drains entered in 60s, 385 NEED_DATA returns, zero chunks and zero fragments
+started, and over three minutes of GOPs queued and still growing while the muxer
+emitted nothing.
 
-Also log the otherwise silent early return, which is the only no-buffer exit
-that emitted no trace at all and made this hard to attribute.
+Also trace the early return, which was the only exit producing no buffers that
+logged nothing at all.
 --- a/mux/fmp4/src/fmp4mux/imp.rs
 +++ b/mux/fmp4/src/fmp4mux/imp.rs
-@@ -1981,10 +1981,27 @@
+@@ -1980,9 +1980,24 @@
+                 || settings.manual_split
          );
  
++        // A stream whose queued GOPs all start after the current fragment end is skipped
++        // here so that the other streams can still be drained. This must not be done for
++        // the first stream: it is the one deciding the chunk end PTS, and if it drains
++        // nothing then drain() takes the AGGREGATOR_FLOW_NEED_DATA path, no chunk and no
++        // fragment is started and the muxer stops producing output while its queue grows
++        // without bound. The first stream has a dedicated fallback below that includes a
++        // GOP ending after the dequeue end PTS, which covers exactly this case.
++        let late_gop = mem::replace(&mut stream.late_gop, false);
++
          let mut gops = Vec::with_capacity(stream.queued_gops.len());
 -        if stream.queued_gops.is_empty() || stream.late_gop {
-+        // Skipping a stream with a late GOP lets the *other* streams be drained, which is
-+        // the point of `late_gop`. It must not be applied to the first stream: draining
-+        // nothing there means no chunk end PTS is decided, drain() takes the
-+        // AGGREGATOR_FLOW_NEED_DATA path and the muxer stops producing output entirely
-+        // while its queue grows without bound.
-+        //
-+        // The first stream (chunk_end_pts == None) has a dedicated fallback further down
-+        // that pushes its GOP even when the GOP ends after the dequeue end PTS, which is
-+        // exactly the late-GOP case. Let it run instead of returning early here.
-+        if stream.queued_gops.is_empty() || (stream.late_gop && chunk_end_pts.is_some()) {
-+            gst::debug!(
+-            stream.late_gop = false;
++        if stream.queued_gops.is_empty() || (late_gop && chunk_end_pts.is_some()) {
++            gst::trace!(
 +                CAT,
 +                obj = stream.sinkpad,
-+                "Draining nothing for this stream (no queued GOPs: {}, late GOP: {})",
-+                stream.queued_gops.is_empty(),
-+                stream.late_gop,
++                "Not draining anything for this stream (queued GOPs: {}, late GOP: {})",
++                stream.queued_gops.len(),
++                late_gop,
 +            );
-             stream.late_gop = false;
              return Ok(gops);
          }
-+        stream.late_gop = false;
  
-         // In manual-split mode, drain everything until the split-now event as requested.
-         if settings.manual_split {
