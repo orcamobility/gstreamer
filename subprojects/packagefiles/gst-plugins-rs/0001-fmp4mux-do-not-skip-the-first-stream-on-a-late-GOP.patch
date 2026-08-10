@@ -40,6 +40,10 @@ emitted nothing.
 
 Also trace the early return, which was the only exit producing no buffers that
 logged nothing at all.
+
+Add a regression test covering chunk mode with GOPs longer than the fragment
+duration, which is the configuration in which the fragment boundary drifts into
+a GOP start and triggers this.
 --- a/mux/fmp4/src/fmp4mux/imp.rs
 +++ b/mux/fmp4/src/fmp4mux/imp.rs
 @@ -1980,9 +1980,24 @@
@@ -69,3 +73,78 @@ logged nothing at all.
              return Ok(gops);
          }
  
+--- a/mux/fmp4/tests/tests.rs
++++ b/mux/fmp4/tests/tests.rs
+@@ -3463,4 +3463,72 @@
+         let _ = h1.pull().unwrap();
+     }
+     assert_eq!(h1.buffers_in_queue(), 0);
++}
++
++#[test]
++fn test_chunk_mode_first_stream_late_gop() {
++    init();
++
++    let mut h = gst_check::Harness::with_padnames("isofmp4mux", Some("sink_0"), Some("src"));
++
++    // Chunk mode with GOPs longer than the fragment duration. The fragment boundary
++    // drifts through the GOP until a GOP starts after the fragment end, at which point
++    // the fill check marks the stream as having a late GOP.
++    //
++    // drain_buffers_one_stream() skips a stream with a late GOP so that the *other*
++    // streams can still be drained. Doing that for the first stream deadlocks the muxer:
++    // it is the stream deciding the chunk end PTS, so draining nothing there makes
++    // drain() return AGGREGATOR_FLOW_NEED_DATA on every cycle. No chunk and no fragment
++    // is started, nothing is pushed downstream and the queue grows without bound.
++    h.element()
++        .unwrap()
++        .set_property("fragment-duration", 2.seconds());
++    h.element()
++        .unwrap()
++        .set_property("chunk-duration", 500.mseconds());
++
++    h.set_src_caps(
++        gst::Caps::builder("video/x-h264")
++            .field("width", 1920i32)
++            .field("height", 1080i32)
++            .field("framerate", gst::Fraction::new(4, 1))
++            .field("stream-format", "avc")
++            .field("alignment", "au")
++            .field("codec_data", gst::Buffer::with_size(1).unwrap())
++            .build(),
++    );
++    h.play();
++
++    // 4fps with a key frame every 10 frames: 2.5s GOPs against a 2s fragment, so a GOP
++    // boundary eventually lands after a fragment end.
++    for i in 0..60u64 {
++        let mut buffer = gst::Buffer::with_size(1).unwrap();
++        {
++            let buffer = buffer.get_mut().unwrap();
++            buffer.set_pts((i * 250).mseconds());
++            buffer.set_dts((i * 250).mseconds());
++            buffer.set_duration(250.mseconds());
++            if i % 10 != 0 {
++                buffer.set_flags(gst::BufferFlags::DELTA_UNIT);
++            }
++        }
++        assert_eq!(h.push(buffer), Ok(gst::FlowSuccess::Ok));
++    }
++
++    // Crank through several fragments, draining whatever the muxer produced each time.
++    let mut produced = Vec::new();
++    for _ in 0..5 {
++        h.crank_single_clock_wait().unwrap();
++        produced.push(h.buffers_in_queue());
++        while h.buffers_in_queue() > 0 {
++            let _ = h.pull().unwrap();
++        }
++    }
++
++    // Without the fix the muxer stops producing output once the first stream is skipped
++    // for a late GOP and never recovers, so the later cranks yield nothing at all.
++    assert!(
++        produced.last().copied().unwrap_or(0) > 0,
++        "muxer stopped producing output, buffers per fragment: {produced:?}"
++    );
+ }
