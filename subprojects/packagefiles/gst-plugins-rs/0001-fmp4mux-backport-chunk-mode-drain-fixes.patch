@@ -1,0 +1,90 @@
+From: Coram Engineering <eng@coram.ai>
+Subject: [PATCH] fmp4mux: backport upstream chunk-mode drain fixes
+
+Backport of three upstream fixes onto gst-plugins-rs c3740cd6a. Together they
+fix a permanent isofmp4mux stall in chunk mode: once a GOP starts after the
+current fragment end, the drain produces nothing on every aggregate call, no
+chunk or fragment is started, nothing is pushed downstream and the input queue
+grows without bound. The streamer does not crash and no alert fires.
+
+Reproduced on a live H.264 + AAC pipeline (fragment-duration=2s,
+chunk-duration=100ms) where a GOP began 36.76us after the fragment end: 373
+drains entered in 60s, 385 AGGREGATOR_FLOW_NEED_DATA returns, zero chunks and
+zero fragments started, 3m03s of GOPs queued and still growing.
+
+Upstream commits, applied to the pre-rename path (mux/fmp4/... rather than
+mux/isobmff/...) since this revision predates the mp4/fmp4 plugin de-duplication:
+
+  c64db4e0d  fmp4mux: Fix draining in chunk mode after partial GOPs were drained
+             The keyframe check was inverted, so GOPs starting *on* a keyframe
+             were wrongly marked as late. Applied to the single occurrence that
+             exists at this revision; upstream has a second one added later.
+
+  6bdeecf1d  fmp4mux: Fix late GOP handling
+             A late GOP must not skip the drain entirely -- there may still be
+             data to output.
+
+  a06e4abb5  isobmff/fmp4mux: Fix delayed push when GOPs start after fragment end
+             With fragment_filled set, dequeue_end_pts is pinned to
+             fragment_end_pts; if all remaining GOPs start past it the drain
+             loop breaks with nothing dequeued. Reset fragment_filled so the
+             drain falls back to chunk boundaries and can make progress.
+
+Not backported: 78dfb9302 ("Fix fragment / chunk decision for
+chunk-mode=keyframe"). It targets the key-frame chunk mode added after this
+revision, which does not exist here, and restructures shared fill-check logic.
+
+These fixes are only available upstream on revisions requiring gstreamer-rs
+0.25+/gstreamer 1.28+, so bumping the wrap is not an option while we build
+gstreamer 1.23.1.
+--- a/mux/fmp4/src/fmp4mux/imp.rs
++++ b/mux/fmp4/src/fmp4mux/imp.rs
+@@ -1620,7 +1620,7 @@
+                     // previously drained a partial GOP because the GOP is ending too far after the
+                     // planned fragment end.
+                     if gop.start_pts > fragment_end_pts
+-                        && !gop.buffers.first().is_some_and(|b| {
++                        && gop.buffers.first().is_some_and(|b| {
+                             b.buffer.flags().contains(gst::BufferFlags::DELTA_UNIT)
+                         })
+                     {
+@@ -1980,9 +1980,9 @@
+                 || settings.manual_split
+         );
+ 
++        stream.late_gop = false;
+         let mut gops = Vec::with_capacity(stream.queued_gops.len());
+-        if stream.queued_gops.is_empty() || stream.late_gop {
+-            stream.late_gop = false;
++        if stream.queued_gops.is_empty() {
+             return Ok(gops);
+         }
+ 
+@@ -2119,6 +2119,27 @@
+         if let Some(chunk_duration) = settings.chunk_duration {
+             // Chunk mode
+ 
++            // Check if the oldest queued GOP starts at or after fragment end
++            // PTS. If fragment_filled is true but all remaining data starts
++            // past the fragment end, this stream has no data within this
++            // fragment. Fall through to chunk boundaries to avoid stalling
++            // the drain.
++            let mut fragment_filled = fragment_filled;
++            if fragment_filled
++                && stream
++                    .queued_gops
++                    .back()
++                    .is_some_and(|gop| gop.start_pts >= fragment_end_pts)
++            {
++                gst::trace!(
++                    CAT,
++                    obj = stream.sinkpad,
++                    "Fragment filled but GOP starts after fragment end PTS {}, falling through to chunk boundaries",
++                    fragment_end_pts,
++                );
++                fragment_filled = false;
++            }
++
+             let dequeue_end_pts = if let Some(chunk_end_pts) = chunk_end_pts {
+                 // Not the first stream
+                 chunk_end_pts
