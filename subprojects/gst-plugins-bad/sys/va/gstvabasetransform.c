@@ -529,6 +529,13 @@ gst_va_base_transform_generate_output (GstBaseTransform * trans,
   gst_video_frame_unmap (&src_frame);
   gst_video_frame_unmap (&dest_frame);
 
+  /* The copy is a new buffer: carry the metadata over, as upstream does.
+   * Without this every GstMeta is lost whenever the output is copied into a
+   * downstream (system memory) buffer. */
+  if (!GST_BASE_TRANSFORM_CLASS (parent_class)->copy_metadata (trans, *outbuf,
+          buffer))
+    GST_WARNING_OBJECT (self, "failed to copy metadata");
+
   gst_buffer_replace (outbuf, buffer);
   ret = GST_FLOW_OK;
 
