@@ -45,6 +45,7 @@
 #include "gstunixfd.h"
 
 #include <gst/base/base.h>
+#include <string.h>
 #include <gst/allocators/allocators.h>
 
 #include <glib/gstdio.h>
@@ -459,6 +460,46 @@ serialize_metas (GstBuffer * buffer, GByteArray * payload)
   return n_meta;
 }
 
+/* Backport of upstream copy_to_shm(): a memory that is not FD backed is copied
+ * into shared memory instead of stopping the pipeline. Upstream allocates from
+ * GstUnixFdAllocator; this tree has GstShmAllocator, which does the same job
+ * here. Elements such as vapostproc pass their own memory through when the
+ * layout needs no copy, so the allocator proposed below is not always used. */
+static GstMemory *
+copy_to_shm (GstUnixFdSink * self, GstMemory * mem)
+{
+  GstAllocator *allocator = gst_shm_allocator_get ();
+  gsize size = gst_memory_get_sizes (mem, NULL, NULL);
+  GstMemory *fd_mem = gst_allocator_alloc (allocator, size, NULL);
+  GstMapInfo src_map, dst_map;
+
+  gst_object_unref (allocator);
+  if (fd_mem == NULL) {
+    GST_ERROR_OBJECT (self, "Shared memory allocation failed.");
+    return NULL;
+  }
+
+  if (!gst_memory_map (mem, &src_map, GST_MAP_READ)) {
+    GST_ERROR_OBJECT (self, "Mapping of source memory failed.");
+    gst_memory_unref (fd_mem);
+    return NULL;
+  }
+
+  if (!gst_memory_map (fd_mem, &dst_map, GST_MAP_WRITE)) {
+    GST_ERROR_OBJECT (self, "Mapping of shared memory failed.");
+    gst_memory_unmap (mem, &src_map);
+    gst_memory_unref (fd_mem);
+    return NULL;
+  }
+
+  memcpy (dst_map.data, src_map.data, src_map.size);
+
+  gst_memory_unmap (fd_mem, &dst_map);
+  gst_memory_unmap (mem, &src_map);
+
+  return fd_mem;
+}
+
 static GstFlowReturn
 gst_unix_fd_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
 {
@@ -498,14 +539,27 @@ gst_unix_fd_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
   new_buffer->n_memory = n_memory;
   new_buffer->n_meta = n_meta;
 
+  /* dst_buffer holds the memories copied into shared memory, if any, and a
+   * reference on the original buffer when some of its memories are sent as
+   * they are. */
+  GstBuffer *dst_buffer = NULL;
+  gboolean ref_original_buffer = FALSE;
+
   gboolean dmabuf_count = 0;
   GUnixFDList *fds = g_unix_fd_list_new ();
   for (int i = 0; i < n_memory; i++) {
     GstMemory *mem = gst_buffer_peek_memory (buffer, i);
     if (!gst_is_fd_memory (mem)) {
-      GST_ERROR_OBJECT (self, "Expecting buffers with FD memories");
-      ret = GST_FLOW_ERROR;
-      goto out;
+      if (dst_buffer == NULL)
+        dst_buffer = gst_buffer_new ();
+      mem = copy_to_shm (self, mem);
+      if (mem == NULL) {
+        ret = GST_FLOW_ERROR;
+        goto out;
+      }
+      gst_buffer_append_memory (dst_buffer, mem);
+    } else {
+      ref_original_buffer = TRUE;
     }
 
     if (gst_is_dmabuf_memory (mem))
@@ -531,12 +585,20 @@ gst_unix_fd_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
   if (dmabuf_count > 0)
     new_buffer->type = MEMORY_TYPE_DMABUF;
 
+  if (dst_buffer != NULL) {
+    new_buffer->id = (guint64) (guintptr) dst_buffer;
+    if (ref_original_buffer)
+      gst_buffer_add_parent_buffer_meta (dst_buffer, buffer);
+    buffer = dst_buffer;
+  }
+
   GST_OBJECT_LOCK (self);
   send_command_to_all (self, COMMAND_TYPE_NEW_BUFFER, fds,
       self->payload->data, self->payload->len, buffer);
   GST_OBJECT_UNLOCK (self);
 
 out:
+  gst_clear_buffer (&dst_buffer);
   g_clear_object (&fds);
   g_clear_error (&error);
   return ret;
