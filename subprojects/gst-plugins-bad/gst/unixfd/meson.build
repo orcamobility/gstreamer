@@ -15,7 +15,7 @@ gstunixfd_plugin = library('gstunixfd',
   sources,
   c_args: gst_plugins_bad_args,
   include_directories: [configinc],
-  dependencies : [gstbase_dep, gstallocators_dep, gio_dep, gio_unix_dep],
+  dependencies : [gstvideo_dep, gstbase_dep, gstallocators_dep, gio_dep, gio_unix_dep],
   install : true,
   install_dir : plugins_install_dir,
 )

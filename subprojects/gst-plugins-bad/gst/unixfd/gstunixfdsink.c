@@ -42,6 +42,7 @@
  * Since: 1.24
  */
 
+#include <gst/video/video.h>
 #include "gstunixfd.h"
 
 #include <gst/base/base.h>
@@ -445,6 +446,26 @@ calculate_timestamp (GstClockTime timestamp, GstClockTime base_time,
   return timestamp;
 }
 
+/* A video meta whose memory maps through custom functions (VA DMABuf
+ * surfaces) cannot be serialized as it is. Its plane layout can: the
+ * receiver needs the strides and offsets to import the tiled surface, and
+ * maps the memory through the DMABuf allocator, not through these
+ * functions. */
+static gboolean
+serialize_video_meta_layout (GstVideoMeta * vmeta, GByteArray * payload)
+{
+  GstBuffer *tmp = gst_buffer_new ();
+  GstVideoMeta *plain = gst_buffer_add_video_meta_full (tmp, vmeta->flags,
+      vmeta->format, vmeta->width, vmeta->height, vmeta->n_planes,
+      vmeta->offset, vmeta->stride);
+  gboolean ok;
+
+  plain->alignment = vmeta->alignment;
+  ok = gst_meta_serialize_simple ((GstMeta *) plain, payload);
+  gst_buffer_unref (tmp);
+  return ok;
+}
+
 static guint16
 serialize_metas (GstBuffer * buffer, GByteArray * payload)
 {
@@ -453,8 +474,12 @@ serialize_metas (GstBuffer * buffer, GByteArray * payload)
   guint16 n_meta = 0;
 
   while ((meta = gst_buffer_iterate_meta (buffer, &state)) != NULL) {
-    if (gst_meta_serialize_simple (meta, payload))
+    if (gst_meta_serialize_simple (meta, payload)) {
       n_meta++;
+    } else if (meta->info->api == GST_VIDEO_META_API_TYPE
+        && serialize_video_meta_layout ((GstVideoMeta *) meta, payload)) {
+      n_meta++;
+    }
   }
 
   return n_meta;
