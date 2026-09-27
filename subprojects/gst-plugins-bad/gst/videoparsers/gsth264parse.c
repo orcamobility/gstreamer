@@ -1447,7 +1447,7 @@ gst_h264_parse_handle_frame (GstBaseParse * parse,
         if (h264parse->in_align == GST_H264_PARSE_ALIGN_NAL ||
             h264parse->in_align == GST_H264_PARSE_ALIGN_AU) {
           /* There is no start code between current_off and the end of the
-           * buffer. gst_h264_parser_identify_nalu() leaves nalu untouched in
+           * buffer. gst_h264_parser_identify_nalu() leaves nalu zeroed in
            * that case, so it still describes the previous NAL (or nothing at
            * all when this is the first iteration of a resumed parse). Make it
            * describe the unparseable tail instead, so that "broken" below
