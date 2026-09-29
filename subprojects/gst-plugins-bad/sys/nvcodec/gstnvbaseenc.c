@@ -63,6 +63,13 @@ gst_nv_preset_get_type (void)
         "low-latency-hp"},
     {GST_NV_PRESET_LOSSLESS_DEFAULT, "Lossless", "lossless"},
     {GST_NV_PRESET_LOSSLESS_HP, "Lossless, High Performance", "lossless-hp"},
+    {GST_NV_PRESET_P1, "P1, fastest (lowest quality)", "p1"},
+    {GST_NV_PRESET_P2, "P2, faster (lower quality)", "p2"},
+    {GST_NV_PRESET_P3, "P3, fast (low quality)", "p3"},
+    {GST_NV_PRESET_P4, "P4, medium", "p4"},
+    {GST_NV_PRESET_P5, "P5, slow (good quality)", "p5"},
+    {GST_NV_PRESET_P6, "P6, slower (better quality)", "p6"},
+    {GST_NV_PRESET_P7, "P7, slowest (best quality)", "p7"},
     {0, NULL, NULL},
   };
 
@@ -88,10 +95,25 @@ _nv_preset_to_guid (GstNvPreset preset)
       CASE (LOW_LATENCY_HP, LOW_LATENCY_HQ);
       CASE (LOSSLESS_DEFAULT, LOSSLESS_DEFAULT);
       CASE (LOSSLESS_HP, LOSSLESS_HP);
+      CASE (P1, P1);
+      CASE (P2, P2);
+      CASE (P3, P3);
+      CASE (P4, P4);
+      CASE (P5, P5);
+      CASE (P6, P6);
+      CASE (P7, P7);
 #undef CASE
     default:
       return null;
   }
+}
+
+/* The P1..P7 presets need the API 10+ preset config call, which also takes a
+ * tuning info; the legacy presets keep the old call. */
+static gboolean
+_nv_preset_is_p_series (GstNvPreset preset)
+{
+  return preset >= GST_NV_PRESET_P1 && preset <= GST_NV_PRESET_P7;
 }
 
 #define GST_TYPE_NV_RC_MODE (gst_nv_rc_mode_get_type())
@@ -1763,13 +1785,32 @@ gst_nv_base_enc_set_format (GstVideoEncoder * enc, GstVideoCodecState * state)
   preset_config.version = gst_nvenc_get_preset_config_version ();
   preset_config.presetCfg.version = gst_nvenc_get_config_version ();
 
-  nv_ret =
-      NvEncGetEncodePresetConfig (nvenc->encoder,
-      params->encodeGUID, params->presetGUID, &preset_config);
-  if (nv_ret != NV_ENC_SUCCESS) {
-    GST_ELEMENT_ERROR (nvenc, LIBRARY, SETTINGS, (NULL),
-        ("Failed to get encode preset configuration: %d", nv_ret));
-    return FALSE;
+  if (_nv_preset_is_p_series (nvenc->preset_enum)) {
+    /* P presets are tuned at configure time. zerolatency picks the
+     * low-latency tuning (no B-frames, no lookahead), which is what the
+     * legacy low-latency-* presets meant; otherwise high quality. */
+    NV_ENC_TUNING_INFO tuning = nvenc->zerolatency ?
+        NV_ENC_TUNING_INFO_LOW_LATENCY : NV_ENC_TUNING_INFO_HIGH_QUALITY;
+
+    params->tuningInfo = tuning;
+    nv_ret =
+        NvEncGetEncodePresetConfigEx (nvenc->encoder,
+        params->encodeGUID, params->presetGUID, tuning, &preset_config);
+    if (nv_ret != NV_ENC_SUCCESS) {
+      GST_ELEMENT_ERROR (nvenc, LIBRARY, SETTINGS, (NULL),
+          ("Failed to get encode preset configuration for P preset "
+              "(needs NVENC API 10+): %d", nv_ret));
+      return FALSE;
+    }
+  } else {
+    nv_ret =
+        NvEncGetEncodePresetConfig (nvenc->encoder,
+        params->encodeGUID, params->presetGUID, &preset_config);
+    if (nv_ret != NV_ENC_SUCCESS) {
+      GST_ELEMENT_ERROR (nvenc, LIBRARY, SETTINGS, (NULL),
+          ("Failed to get encode preset configuration: %d", nv_ret));
+      return FALSE;
+    }
   }
 
   params->encodeConfig = &preset_config.presetCfg;

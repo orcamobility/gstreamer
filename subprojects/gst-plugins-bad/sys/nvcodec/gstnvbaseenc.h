@@ -48,6 +48,15 @@ typedef enum {
   GST_NV_PRESET_LOW_LATENCY_HP,
   GST_NV_PRESET_LOSSLESS_DEFAULT,
   GST_NV_PRESET_LOSSLESS_HP,
+  /* NVENC API 10+ presets. Driver R590 removed the legacy preset GUIDs
+   * above, so these are the only ones that still configure there. */
+  GST_NV_PRESET_P1,
+  GST_NV_PRESET_P2,
+  GST_NV_PRESET_P3,
+  GST_NV_PRESET_P4,
+  GST_NV_PRESET_P5,
+  GST_NV_PRESET_P6,
+  GST_NV_PRESET_P7,
 } GstNvPreset;
 
 typedef enum {
