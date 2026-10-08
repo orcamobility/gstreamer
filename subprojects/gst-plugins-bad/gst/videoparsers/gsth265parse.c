@@ -749,6 +749,11 @@ gst_h265_parse_process_nal (GstH265Parse * h265parse, GstH265NalUnit * nalu)
     return TRUE;
   }
 
+  if (G_UNLIKELY (nalu->data[nalu->offset] & 0x80)) {
+    GST_WARNING_OBJECT (h265parse, "NAL has forbidden_zero_bit set");
+    return FALSE;
+  }
+
   /* we have a peek as well */
   nal_type = nalu->type;
 
@@ -1313,6 +1318,12 @@ gst_h265_parse_handle_frame (GstBaseParse * parse,
 
     GST_DEBUG_OBJECT (h265parse, "%p complete nal found. Off: %u, Size: %u",
         data, nalu.offset, nalu.size);
+
+    if (G_UNLIKELY (nalu.data[nalu.offset] & 0x80)) {
+      GST_WARNING_OBJECT (h265parse, "NAL has forbidden_zero_bit set");
+      *skipsize = nalu.size;
+      goto skip;
+    }
 
     if (gst_h265_parse_collect_nal (h265parse, data, size, &nalu)) {
       /* complete current frame, if it exist */
