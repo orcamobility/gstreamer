@@ -1354,6 +1354,17 @@ gst_h264_decoder_decode_nal (GstH264Decoder * self, GstH264NalUnit * nalu)
   GST_LOG_OBJECT (self, "Parsed nal type: %d, offset %d, size %d",
       nalu->type, nalu->offset, nalu->size);
 
+  /* forbidden_zero_bit shall be 0 (H.264 7.4.1) and decoders ignore NAL units
+   * where it is not. Some cameras emit a vendor NAL unit 0x87 right after the
+   * SPS; its type bits say SPS, its payload is not one (profile_idc 0), and
+   * accepting it makes the subclass refuse the "new sequence", which ends the
+   * pipeline with not-negotiated. Hardware parsers (nvh264dec) skip it. */
+  if (nalu->size > 0 && (nalu->data[nalu->offset] & 0x80)) {
+    GST_DEBUG_OBJECT (self, "Ignoring NAL unit with forbidden_zero_bit set "
+        "(type %d, size %d)", nalu->type, nalu->size);
+    return GST_FLOW_OK;
+  }
+
   switch (nalu->type) {
     case GST_H264_NAL_SPS:
       ret = gst_h264_decoder_parse_sps (self, nalu);
