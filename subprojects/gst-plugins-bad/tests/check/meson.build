@@ -161,6 +161,11 @@ endif
 # linux only tests
 if host_machine.system() == 'linux'
   base_tests += [
+    [['libs/cudaipc.cpp'], not gstcuda_dep.found() or not gio_unix_dep.found(),
+      [gstcuda_dep, gstcuda_stub_dep, gio_unix_dep],
+      ['../../sys/nvcodec/gstcudaipc.cpp',
+       '../../sys/nvcodec/gstcudaipcserver.cpp',
+       '../../sys/nvcodec/gstcudaipcserver_unix.cpp']],
     [['elements/vapostproc.c'], not gstva_dep.found(), [gstva_dep]],
     [['elements/vacompositor.c'], not gstva_dep.found(), [gstva_dep]],
   ]
