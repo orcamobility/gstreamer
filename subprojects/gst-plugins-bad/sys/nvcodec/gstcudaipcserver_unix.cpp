@@ -372,9 +372,20 @@ gst_cuda_ipc_server_unix_loop (GstCudaIpcServer * server)
   GST_DEBUG_OBJECT (self, "Loop stopped");
 
   if (service) {
+    /* Do not deliver a queued incoming connection during teardown. */
+    g_signal_handlers_disconnect_by_data (service, self);
+
+    /* The service owns a separate cancellable for its pending accept. */
+    g_socket_service_stop (service);
+    g_socket_listener_close (G_SOCKET_LISTENER (service));
     g_cancellable_cancel (priv->cancellable);
     g_unlink (priv->address.c_str ());
     g_clear_object (&service);
+
+    /* Complete cancelled async operations before abandoning their context.
+     * Otherwise GTask retains the service, listener and context wakeup fd. */
+    while (g_main_context_pending (priv->main_context))
+      g_main_context_iteration (priv->main_context, FALSE);
   }
 
   g_main_context_pop_thread_default (priv->main_context);
