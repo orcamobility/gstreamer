@@ -162,7 +162,6 @@ foreach custom_subproj: get_option('custom_subprojects').split(',')
     endif
 endforeach
 
-
 subprojects_names = []
 plugins_doc_caches = []
 orc_update_targets = []
@@ -658,6 +657,8 @@ if dotnet_format.found()
         ],
     )
 endif
+
+subdir('jetson/gst-nvunixfd_src')
 
 summary({
   'gstreamer-full library': building_full,
