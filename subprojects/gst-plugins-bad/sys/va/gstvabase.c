@@ -72,6 +72,24 @@ _try_import_dmabuf_unlocked (GstVaBufferImporter * importer, GstBuffer * inbuf)
   if (!gst_video_info_align_full (&in_info, &align, plane_size))
     return FALSE;
 
+  /* gst_video_info_align_full() recomputes strides and offsets from the
+   * width, so the layout taken from the video meta above is lost. A tiled
+   * DMABuf surface (AMD: pitch 2048 for a 1920 wide NV12 frame) then gets a
+   * descriptor with the wrong pitches and the driver refuses the import.
+   * Put the meta's layout back and size the planes from it. */
+  if (meta) {
+    for (i = 0; i < n_planes; i++) {
+      GST_VIDEO_INFO_PLANE_OFFSET (&in_info, i) = meta->offset[i];
+      GST_VIDEO_INFO_PLANE_STRIDE (&in_info, i) = meta->stride[i];
+    }
+    for (i = 0; i < n_planes; i++) {
+      gsize next = (i + 1 < n_planes) ? meta->offset[i + 1] :
+          gst_buffer_get_size (inbuf);
+      if (next > meta->offset[i])
+        plane_size[i] = next - meta->offset[i];
+    }
+  }
+
   /* Find and validate all memories */
   for (i = 0; i < n_planes; i++) {
     guint length;
@@ -99,6 +117,9 @@ _try_import_dmabuf_unlocked (GstVaBufferImporter * importer, GstBuffer * inbuf)
 
   usage_hint = va_get_surface_usage_hint (importer->display,
       importer->entrypoint, GST_PAD_SINK, TRUE);
+
+  /* The descriptor is built from drm_info.vinfo: give it the real layout. */
+  drm_info.vinfo = in_info;
 
   /* Now create a VASurfaceID for the buffer */
   return gst_va_dmabuf_memories_setup (importer->display, &drm_info, mems, fd,
