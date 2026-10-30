@@ -27,9 +27,10 @@
 #include <gst/check/gstcheck.h>
 #include <gst/app/app.h>
 #include <glib/gstdio.h>
+#include <gio/gunixsocketaddress.h>
 
 static void
-wait_preroll (GstElement * element)
+wait_preroll (GstElement *element)
 {
   GstStateChangeReturn state_res =
       gst_element_set_state (element, GST_STATE_PLAYING);
@@ -39,7 +40,7 @@ wait_preroll (GstElement * element)
 }
 
 static GstPadProbeReturn
-buffer_pad_probe_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
+buffer_pad_probe_cb (GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
   GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
   if (buffer != NULL) {
@@ -388,6 +389,66 @@ GST_START_TEST (test_unixfd_big_payload)
 
 GST_END_TEST;
 
+static void
+client_connected_cb (GstElement * sink, gpointer data)
+{
+  g_atomic_int_inc ((gint *) data);
+}
+
+GST_START_TEST (test_stalled_client_does_not_block)
+{
+  GError *error = NULL;
+  gchar *path = g_strdup_printf ("%s/unixfd-stalled-%u",
+      g_get_user_runtime_dir (), g_random_int ());
+  gchar *desc = g_strdup_printf ("videotestsrc is-live=true num-buffers=45 ! "
+      "video/x-raw,width=64,height=64,framerate=30/1 ! "
+      "unixfdsink name=server max-buffers=4 socket-path=%s", path);
+  GstElement *pipeline = gst_parse_launch (desc, &error);
+  g_assert_no_error (error);
+  GstElement *sink = gst_bin_get_by_name (GST_BIN (pipeline), "server");
+  gint connected = 0;
+  g_signal_connect (sink, "client-connected", G_CALLBACK (client_connected_cb),
+      &connected);
+  wait_preroll (pipeline);
+
+  GSocket *client = g_socket_new (G_SOCKET_FAMILY_UNIX, G_SOCKET_TYPE_STREAM,
+      G_SOCKET_PROTOCOL_DEFAULT, &error);
+  g_assert_no_error (error);
+  GSocketAddress *address = g_unix_socket_address_new (path);
+  fail_unless (g_socket_connect (client, address, NULL, &error));
+  g_assert_no_error (error);
+  /* The client reads neither commands nor FDs, and releases no buffers. */
+  GstBus *bus = gst_element_get_bus (pipeline);
+  GstMessage *message = gst_bus_timed_pop_filtered (bus, 5 * GST_SECOND,
+      GST_MESSAGE_EOS | GST_MESSAGE_ERROR);
+  fail_unless (message != NULL);
+  fail_unless_equals_int (GST_MESSAGE_TYPE (message), GST_MESSAGE_EOS);
+  fail_unless_equals_int (g_atomic_int_get (&connected), 1);
+  /* Drain socket bytes only after the producer finishes. EOF proves that the
+   * limit disconnected the stalled client, rather than merely dropping AUs. */
+  g_socket_set_timeout (client, 1);
+  gchar bytes[4096];
+  gssize received;
+  do {
+    received = g_socket_receive (client, bytes, sizeof (bytes), NULL, &error);
+    g_assert_no_error (error);
+  } while (received > 0);
+  fail_unless_equals_int (received, 0);
+  gint64 before = g_get_monotonic_time ();
+  gst_element_set_state (pipeline, GST_STATE_NULL);
+  fail_unless (g_get_monotonic_time () - before < G_TIME_SPAN_SECOND);
+  gst_message_unref (message);
+  gst_object_unref (bus);
+  gst_object_unref (sink);
+  gst_object_unref (pipeline);
+  g_object_unref (address);
+  g_object_unref (client);
+  g_free (desc);
+  g_free (path);
+}
+
+GST_END_TEST;
+
 static Suite *
 unixfd_suite (void)
 {
@@ -399,6 +460,7 @@ unixfd_suite (void)
   tcase_add_test (tc, test_unixfd_segment);
   tcase_add_test (tc, test_unixfd_copy);
   tcase_add_test (tc, test_unixfd_big_payload);
+  tcase_add_test (tc, test_stalled_client_does_not_block);
 
   return s;
 }

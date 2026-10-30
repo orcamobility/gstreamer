@@ -48,13 +48,15 @@ G_STATIC_ASSERT (sizeof (NewBufferPayload) == 56);
 G_STATIC_ASSERT (sizeof (ReleaseBufferPayload) == 8);
 
 gboolean
-gst_unix_fd_send_command (GSocket * socket, CommandType type, GUnixFDList * fds,
-    const guint8 * payload, gsize payload_size, GError ** error)
+gst_unix_fd_send_command (GSocket *socket, CommandType type, GUnixFDList *fds,
+    const guint8 *payload, gsize payload_size, GError **error)
 {
   Command command = { type, payload_size };
   GOutputVector vect[] = {
     {&command, sizeof (Command)},
+    {payload, payload_size},
   };
+  gint n_vect = payload_size > 0 ? 2 : 1;
   GSocketControlMessage *msg = NULL;
   gint num_msg = 0;
   gboolean ret = TRUE;
@@ -64,22 +66,33 @@ gst_unix_fd_send_command (GSocket * socket, CommandType type, GUnixFDList * fds,
     num_msg++;
   }
 
-  if (g_socket_send_message (socket, NULL, vect, G_N_ELEMENTS (vect),
-          &msg, num_msg, G_SOCKET_MSG_NONE, NULL, error) < 0) {
+  /* Send header and payload in a single sendmsg() so small commands (e.g.
+   * RELEASE_BUFFER) arrive atomically on non-blocking peer sockets without
+   * triggering a split-syscall EAGAIN disconnect, while still looping for
+   * payloads larger than the socket buffer. */
+  gssize sent = g_socket_send_message (socket, NULL, vect, n_vect,
+      &msg, num_msg, G_SOCKET_MSG_NONE, NULL, error);
+  if (sent < 0) {
     ret = FALSE;
-  }
-
-  if (ret && payload_size > 0) {
-    gsize remaining = payload_size;
-    const gchar *ptr = (const char *) payload;
+  } else if ((gsize) sent < sizeof (Command)) {
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+        "Incomplete Unix FD command; disconnecting client");
+    ret = FALSE;
+  } else if ((gsize) sent < sizeof (Command) + payload_size) {
+    gsize offset = (gsize) sent - sizeof (Command);
+    gsize remaining = payload_size - offset;
+    const gchar *ptr = (const char *) payload + offset;
     while (remaining > 0) {
-      gssize sent = g_socket_send (socket, ptr, remaining, NULL, error);
-      if (sent < 0) {
+      gssize n = g_socket_send (socket, ptr, remaining, NULL, error);
+      if (n <= 0) {
+        if (n == 0)
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+              "Incomplete Unix FD command payload; disconnecting client");
         ret = FALSE;
         break;
       }
-      remaining -= sent;
-      ptr += sent;
+      remaining -= n;
+      ptr += n;
     }
   }
 
@@ -89,9 +102,9 @@ gst_unix_fd_send_command (GSocket * socket, CommandType type, GUnixFDList * fds,
 }
 
 gboolean
-gst_unix_fd_receive_command (GSocket * socket, GCancellable * cancellable,
-    CommandType * type, GUnixFDList ** fds, guint8 ** payload,
-    gsize * payload_size, GError ** error)
+gst_unix_fd_receive_command (GSocket *socket, GCancellable *cancellable,
+    CommandType *type, GUnixFDList **fds, guint8 **payload,
+    gsize *payload_size, GError **error)
 {
   Command command;
   GInputVector vect = { &command, sizeof (Command) };
@@ -100,9 +113,14 @@ gst_unix_fd_receive_command (GSocket * socket, GCancellable * cancellable,
   gint flags = G_SOCKET_MSG_NONE;
   gboolean ret = TRUE;
 
-  if (g_socket_receive_message (socket, NULL, &vect, 1, &msg, &num_msg, &flags,
-          cancellable, error) <= 0) {
-    return FALSE;
+  gssize received = g_socket_receive_message (socket, NULL, &vect, 1, &msg,
+      &num_msg, &flags, cancellable, error);
+  if (received != sizeof (Command)) {
+    if (received > 0)
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+          "Incomplete Unix FD command header");
+    ret = FALSE;
+    goto out;
   }
 
   *type = command.type;
@@ -117,7 +135,10 @@ gst_unix_fd_receive_command (GSocket * socket, GCancellable * cancellable,
     while (remaining > 0) {
       gssize received =
           g_socket_receive (socket, ptr, remaining, cancellable, error);
-      if (received < 0) {
+      if (received <= 0) {
+        if (received == 0)
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+              "Incomplete Unix FD command payload");
         g_clear_pointer (payload, g_free);
         ret = FALSE;
         goto out;
@@ -154,8 +175,8 @@ out:
 }
 
 gboolean
-gst_unix_fd_parse_new_buffer (guint8 * payload, gsize payload_size,
-    NewBufferPayload ** new_buffer, guint32 * consumed)
+gst_unix_fd_parse_new_buffer (guint8 *payload, gsize payload_size,
+    NewBufferPayload **new_buffer, guint32 *consumed)
 {
   if (payload == NULL || payload_size < sizeof (NewBufferPayload))
     return FALSE;
@@ -173,8 +194,8 @@ gst_unix_fd_parse_new_buffer (guint8 * payload, gsize payload_size,
 }
 
 gboolean
-gst_unix_fd_parse_release_buffer (guint8 * payload, gsize payload_size,
-    ReleaseBufferPayload ** release_buffer)
+gst_unix_fd_parse_release_buffer (guint8 *payload, gsize payload_size,
+    ReleaseBufferPayload **release_buffer)
 {
   if (payload == NULL || payload_size < sizeof (ReleaseBufferPayload))
     return FALSE;
@@ -185,7 +206,7 @@ gst_unix_fd_parse_release_buffer (guint8 * payload, gsize payload_size,
 }
 
 gboolean
-gst_unix_fd_parse_caps (guint8 * payload, gsize payload_size, gchar ** caps_str)
+gst_unix_fd_parse_caps (guint8 *payload, gsize payload_size, gchar **caps_str)
 {
   if (payload == NULL || payload_size < 1 || payload[payload_size - 1] != '\0')
     return FALSE;
@@ -196,9 +217,9 @@ gst_unix_fd_parse_caps (guint8 * payload, gsize payload_size, gchar ** caps_str)
 }
 
 GSocket *
-gst_unix_fd_socket_new (const gchar * socket_path,
-    GUnixSocketAddressType socket_type, GSocketAddress ** address,
-    GError ** error)
+gst_unix_fd_socket_new (const gchar *socket_path,
+    GUnixSocketAddressType socket_type, GSocketAddress **address,
+    GError **error)
 {
   if (socket_path == NULL) {
     g_set_error_literal (error, GST_STREAM_ERROR, GST_STREAM_ERROR_FAILED,
@@ -232,7 +253,7 @@ gst_unix_fd_socket_new (const gchar * socket_path,
 }
 
 static gboolean
-plugin_init (GstPlugin * plugin)
+plugin_init (GstPlugin *plugin)
 {
   gst_plugin_set_static_features_flag (plugin);
   gboolean ret = FALSE;

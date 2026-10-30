@@ -84,6 +84,7 @@ struct _GstUnixFdSink
   GUnixSocketAddressType socket_type;
   GSocket *socket;
   GSource *source;
+  guint max_buffers;
 
   /* GSocket -> Client */
   GHashTable *clients;
@@ -115,13 +116,16 @@ enum
   PROP_WAIT_FOR_CONNECTION,
   PROP_MIN_MEMORY_SIZE,
   PROP_NUM_CLIENTS,
+  PROP_MAX_BUFFERS,
   NUM_PROPERTIES
 };
 
 static GParamSpec *properties[NUM_PROPERTIES];
 
+static guint client_connected_signal;
+
 static void
-client_free (Client * client)
+client_free (Client *client)
 {
   g_hash_table_unref (client->buffers);
   g_source_destroy (client->source);
@@ -190,7 +194,7 @@ allocator_unref (GstUnixFdAllocator * allocator)
 }
 
 static void
-gst_unix_fd_sink_init (GstUnixFdSink * self)
+gst_unix_fd_sink_init (GstUnixFdSink *self)
 {
   g_return_if_fail (GST_IS_UNIX_FD_SINK (self));
 
@@ -203,7 +207,7 @@ gst_unix_fd_sink_init (GstUnixFdSink * self)
 }
 
 static void
-gst_unix_fd_sink_finalize (GObject * object)
+gst_unix_fd_sink_finalize (GObject *object)
 {
   GstUnixFdSink *self = GST_UNIX_FD_SINK (object);
 
@@ -217,14 +221,17 @@ gst_unix_fd_sink_finalize (GObject * object)
 }
 
 static void
-gst_unix_fd_sink_set_property (GObject * object, guint prop_id,
-    const GValue * value, GParamSpec * pspec)
+gst_unix_fd_sink_set_property (GObject *object, guint prop_id,
+    const GValue *value, GParamSpec *pspec)
 {
   GstUnixFdSink *self = GST_UNIX_FD_SINK (object);
 
   GST_OBJECT_LOCK (self);
 
   switch (prop_id) {
+    case PROP_MAX_BUFFERS:
+      self->max_buffers = g_value_get_uint (value);
+      break;
     case PROP_SOCKET_PATH:
       if (self->socket) {
         GST_WARNING_OBJECT (self,
@@ -259,14 +266,17 @@ gst_unix_fd_sink_set_property (GObject * object, guint prop_id,
 }
 
 static void
-gst_unix_fd_sink_get_property (GObject * object, guint prop_id,
-    GValue * value, GParamSpec * pspec)
+gst_unix_fd_sink_get_property (GObject *object, guint prop_id,
+    GValue *value, GParamSpec *pspec)
 {
   GstUnixFdSink *self = GST_UNIX_FD_SINK (object);
 
   GST_OBJECT_LOCK (self);
 
   switch (prop_id) {
+    case PROP_MAX_BUFFERS:
+      g_value_set_uint (value, self->max_buffers);
+      break;
     case PROP_SOCKET_PATH:
       g_value_set_string (value, self->socket_path);
       break;
@@ -291,7 +301,7 @@ gst_unix_fd_sink_get_property (GObject * object, guint prop_id,
 }
 
 static gboolean
-incoming_command_cb (GSocket * socket, GIOCondition cond, gpointer user_data)
+incoming_command_cb (GSocket *socket, GIOCondition cond, gpointer user_data)
 {
   GstUnixFdSink *self = user_data;
   Client *client;
@@ -365,7 +375,7 @@ on_error:
 }
 
 static guint8 *
-caps_to_payload (GstCaps * caps, gsize * payload_size)
+caps_to_payload (GstCaps *caps, gsize *payload_size)
 {
   gchar *payload = gst_caps_to_string (caps);
   *payload_size = strlen (payload) + 1;
@@ -373,7 +383,7 @@ caps_to_payload (GstCaps * caps, gsize * payload_size)
 }
 
 static gboolean
-new_client_cb (GSocket * socket, GIOCondition cond, gpointer user_data)
+new_client_cb (GSocket *socket, GIOCondition cond, gpointer user_data)
 {
   GstUnixFdSink *self = user_data;
   Client *client;
@@ -385,6 +395,9 @@ new_client_cb (GSocket * socket, GIOCondition cond, gpointer user_data)
     return G_SOURCE_CONTINUE;
   }
 
+  /* Never let a frozen reader hold the sink lock during render or stop.
+   * A partial command disconnects the client instead of corrupting framing. */
+  g_socket_set_blocking (client_socket, FALSE);
   client = g_new0 (Client, 1);
   client->buffers =
       g_hash_table_new_full (NULL, NULL, (GDestroyNotify) gst_buffer_unref,
@@ -402,9 +415,11 @@ new_client_cb (GSocket * socket, GIOCondition cond, gpointer user_data)
   /* Start by sending our current caps. Keep the lock while doing that because
    * we don't want this client to miss a caps event or receive a buffer while we
    * send initial caps. */
-  gsize payload_size;
-  guint8 *payload = caps_to_payload (self->caps, &payload_size);
-  if (!gst_unix_fd_send_command (client_socket, COMMAND_TYPE_CAPS, NULL,
+  gsize payload_size = 0;
+  guint8 *payload =
+      self->caps ? caps_to_payload (self->caps, &payload_size) : NULL;
+  if (payload
+      && !gst_unix_fd_send_command (client_socket, COMMAND_TYPE_CAPS, NULL,
           payload, payload_size, &error)) {
     GST_ERROR_OBJECT (self, "Failed to send caps to new client %p: %s", client,
         error->message);
@@ -416,6 +431,7 @@ new_client_cb (GSocket * socket, GIOCondition cond, gpointer user_data)
   g_cond_signal (&self->wait_for_connection_cond);
 
   GST_OBJECT_UNLOCK (self);
+  g_signal_emit (self, client_connected_signal, 0);
 
   g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_NUM_CLIENTS]);
 
@@ -431,7 +447,7 @@ thread_cb (gpointer user_data)
 }
 
 static gboolean
-gst_unix_fd_sink_start (GstBaseSink * bsink)
+gst_unix_fd_sink_start (GstBaseSink *bsink)
 {
   GstUnixFdSink *self = (GstUnixFdSink *) bsink;
   GSocketAddress *addr = NULL;
@@ -484,7 +500,7 @@ out:
 }
 
 static gboolean
-gst_unix_fd_sink_stop (GstBaseSink * bsink)
+gst_unix_fd_sink_stop (GstBaseSink *bsink)
 {
   GstUnixFdSink *self = (GstUnixFdSink *) bsink;
 
@@ -517,6 +533,14 @@ send_command_to_all (GstUnixFdSink * self, CommandType type, GUnixFDList * fds,
   g_hash_table_iter_init (&iter, self->clients);
   while (g_hash_table_iter_next (&iter, (gpointer) & socket,
           (gpointer) & client)) {
+    if (buffer && self->max_buffers &&
+        g_hash_table_size (client->buffers) >= self->max_buffers) {
+      GST_WARNING_OBJECT (self, "Disconnecting client retaining %u buffers",
+          self->max_buffers);
+      g_hash_table_iter_remove (&iter);
+      client_removed = TRUE;
+      continue;
+    }
     if (!gst_unix_fd_send_command (socket, type, fds, payload, payload_size,
             &error)) {
       GST_ERROR_OBJECT (self, "Failed to send command %d to client %p: %s",
@@ -562,7 +586,7 @@ to_monotonic (GstClockTime timestamp, const GstSegment * segment,
 }
 
 static guint16
-serialize_metas (GstBuffer * buffer, GByteArray * payload)
+serialize_metas (GstBuffer *buffer, GByteArray *payload)
 {
   gpointer state = NULL;
   GstMeta *meta;
@@ -577,7 +601,7 @@ serialize_metas (GstBuffer * buffer, GByteArray * payload)
 }
 
 static GstFlowReturn
-gst_unix_fd_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+gst_unix_fd_sink_render (GstBaseSink *bsink, GstBuffer *buffer)
 {
   GstUnixFdSink *self = (GstUnixFdSink *) bsink;
   GstFlowReturn ret = GST_FLOW_OK;
@@ -784,7 +808,7 @@ gst_unix_fd_sink_event (GstBaseSink * bsink, GstEvent * event)
 }
 
 static gboolean
-gst_unix_fd_sink_propose_allocation (GstBaseSink * bsink, GstQuery * query)
+gst_unix_fd_sink_propose_allocation (GstBaseSink *bsink, GstQuery *query)
 {
   GstAllocator *allocator = gst_shm_allocator_get ();
   gst_query_add_allocation_param (query, allocator, NULL);
@@ -794,7 +818,7 @@ gst_unix_fd_sink_propose_allocation (GstBaseSink * bsink, GstQuery * query)
 }
 
 static gboolean
-gst_unix_fd_sink_set_clock (GstElement * element, GstClock * clock)
+gst_unix_fd_sink_set_clock (GstElement *element, GstClock *clock)
 {
   GstUnixFdSink *self = (GstUnixFdSink *) element;
 
@@ -826,7 +850,7 @@ gst_unix_fd_sink_change_state (GstElement * element, GstStateChange transition)
 }
 
 static void
-gst_unix_fd_sink_class_init (GstUnixFdSinkClass * klass)
+gst_unix_fd_sink_class_init (GstUnixFdSinkClass *klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *gstelement_class = (GstElementClass *) klass;
@@ -858,6 +882,16 @@ gst_unix_fd_sink_class_init (GstUnixFdSinkClass * klass)
   gstbasesink_class->unlock = GST_DEBUG_FUNCPTR (gst_unix_fd_sink_unlock);
   gstbasesink_class->unlock_stop =
       GST_DEBUG_FUNCPTR (gst_unix_fd_sink_unlock_stop);
+
+  /* Applications can request a new keyframe for late-joining readers. */
+  client_connected_signal = g_signal_new ("client-connected",
+      G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+      G_TYPE_NONE, 0);
+
+  properties[PROP_MAX_BUFFERS] =
+      g_param_spec_uint ("max-buffers", "Maximum retained buffers",
+      "Disconnect clients retaining this many buffers (0 = unlimited)",
+      0, G_MAXUINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
   properties[PROP_SOCKET_PATH] =
       g_param_spec_string ("socket-path",
