@@ -26,6 +26,7 @@
 
 #include "vacompat.h"
 #include "gstvabase.h"
+#include "gstvabuffercopy.h"
 #include "gstvapluginutils.h"
 
 #define GST_CAT_DEFAULT gst_va_base_enc_debug
@@ -403,7 +404,7 @@ gst_va_base_enc_copy_coded_segments (VACodedBufferSegment * seg_list,
   }
 
   for (seg = seg_list; seg; seg = seg->next) {
-    memcpy (dst + offset, seg->buf, seg->size);
+    gst_va_buffer_copy (dst + offset, seg->buf, seg->size);
     offset += seg->size;
   }
 

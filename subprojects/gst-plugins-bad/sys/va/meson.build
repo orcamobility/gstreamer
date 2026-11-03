@@ -37,6 +37,7 @@ va_headers = [
   'gstvaav1enc.h',
   'gstvabaseenc.h',
   'gstvabasetransform.h',
+  'gstvabuffercopy.h',
   'gstvacompositor.h',
   'gstvadeinterlace.h',
   'gstvah264dec.h',
