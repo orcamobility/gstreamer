@@ -40,6 +40,7 @@
 #include "gstnvdecoder.h"
 #include "gstcudamemorycopy.h"
 #include "gstcudaconvertscale.h"
+#include "gstcudakernel.h"
 #ifdef HAVE_NVCODEC_NVMM
 #include "gstcudanvmm.h"
 #endif
@@ -288,6 +289,8 @@ plugin_init (GstPlugin * plugin)
   }
 
   gst_cuda_memory_copy_register (plugin, GST_RANK_NONE);
+  gst_element_register (plugin, "cudakernel", GST_RANK_NONE,
+      GST_TYPE_CUDA_KERNEL);
 
   if (have_nvrtc) {
     gst_element_register (plugin, "cudaconvert", GST_RANK_NONE,

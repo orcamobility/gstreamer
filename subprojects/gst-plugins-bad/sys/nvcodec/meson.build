@@ -7,6 +7,7 @@ nvcodec_sources = [
   'gstcudaipcserver.cpp',
   'gstcudaipcsink.cpp',
   'gstcudaipcsrc.cpp',
+  'gstcudakernel.c',
   'gstcudamemorycopy.c',
   'gstcuvidloader.c',
   'gstnvav1dec.cpp',
