@@ -30,8 +30,10 @@
  * valid until the launch completes.
  *
  * Applications may provide a read-only parameter block as GBytes. The
- * device pointer and size are zero when the block is empty. Module,
- * parameters and dynamic shared memory settings are configurable in READY.
+ * device pointer and size are zero when the block is empty. A handler for
+ * #GstCudaKernel::prepare-parameters can supply a new block when the frame
+ * geometry changes. Module, parameters and dynamic shared memory settings
+ * are configurable in READY.
  * A module runs in the pipeline's CUDA context with access to its memory.
  *
  * ## Example launch line
@@ -61,6 +63,7 @@ struct _GstCudaKernel
 {
   GstCudaBaseTransform parent;
   gchar *module_location;
+  GBytes *module_data;
   GBytes *parameters;
   guint shared_memory;
 
@@ -75,9 +78,12 @@ enum
 {
   PROP_0,
   PROP_MODULE_LOCATION,
+  PROP_MODULE_DATA,
   PROP_PARAMETERS,
   PROP_SHARED_MEMORY,
 };
+
+static guint prepare_parameters_signal;
 
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK, GST_PAD_ALWAYS, GST_STATIC_CAPS (KERNEL_CAPS));
@@ -93,7 +99,7 @@ gst_cuda_kernel_set_property (GObject * object, guint prop_id,
 {
   GstCudaKernel *self = GST_CUDA_KERNEL (object);
   GstElement *element = GST_ELEMENT (object);
-  GBytes *old_parameters = NULL;
+  GBytes *old_bytes = NULL;
 
   GST_OBJECT_LOCK (element);
   if (GST_STATE (element) > GST_STATE_READY ||
@@ -108,8 +114,12 @@ gst_cuda_kernel_set_property (GObject * object, guint prop_id,
       g_free (self->module_location);
       self->module_location = g_value_dup_string (value);
       break;
+    case PROP_MODULE_DATA:
+      old_bytes = self->module_data;
+      self->module_data = g_value_dup_boxed (value);
+      break;
     case PROP_PARAMETERS:
-      old_parameters = self->parameters;
+      old_bytes = self->parameters;
       self->parameters = g_value_dup_boxed (value);
       break;
     case PROP_SHARED_MEMORY:
@@ -120,7 +130,7 @@ gst_cuda_kernel_set_property (GObject * object, guint prop_id,
       break;
   }
   GST_OBJECT_UNLOCK (element);
-  g_clear_pointer (&old_parameters, g_bytes_unref);
+  g_clear_pointer (&old_bytes, g_bytes_unref);
 }
 
 static void
@@ -133,6 +143,9 @@ gst_cuda_kernel_get_property (GObject * object, guint prop_id,
   switch (prop_id) {
     case PROP_MODULE_LOCATION:
       g_value_set_string (value, self->module_location);
+      break;
+    case PROP_MODULE_DATA:
+      g_value_set_boxed (value, self->module_data);
       break;
     case PROP_PARAMETERS:
       g_value_set_boxed (value, self->parameters);
@@ -183,6 +196,7 @@ gst_cuda_kernel_finalize (GObject * object)
 
   gst_cuda_kernel_clear_module (self);
   g_free (self->module_location);
+  g_clear_pointer (&self->module_data, g_bytes_unref);
   g_clear_pointer (&self->parameters, g_bytes_unref);
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -193,10 +207,10 @@ gst_cuda_kernel_load_module (GstCudaKernel * self, GstCudaContext * context)
   g_autofree gchar *image = NULL;
   g_autoptr (GError) error = NULL;
   gsize image_size;
-  gsize size = self->parameters ? g_bytes_get_size (self->parameters) : 0;
+  gconstpointer module_data;
+  const gchar *location = self->module_location;
   CUmodule module = NULL;
   CUfunction function;
-  CUdeviceptr device_parameters = 0;
   CUresult result;
   const gchar *operation = "cuModuleLoadData";
 
@@ -204,25 +218,22 @@ gst_cuda_kernel_load_module (GstCudaKernel * self, GstCudaContext * context)
     return TRUE;
 
   gst_cuda_kernel_clear_module (self);
-  if (!self->module_location || !*self->module_location) {
+  if (self->module_data && g_bytes_get_size (self->module_data)) {
+    module_data = g_bytes_get_data (self->module_data, NULL);
+    location = "(module-data)";
+  } else if (!location || !*location) {
     GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
-        ("A CUDA module-location is required"), (NULL));
+        ("A CUDA module-location or module-data is required"), (NULL));
     return FALSE;
-  }
-
-  if (size > G_MAXUINT32) {
-    GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
-        ("CUDA kernel parameter block is too large"), (NULL));
-    return FALSE;
-  }
-
-  /* g_file_get_contents() adds the terminator required by PTX modules. */
-  if (!g_file_get_contents (self->module_location, &image, &image_size, &error)
-      || image_size == 0) {
-    GST_ELEMENT_ERROR (self, RESOURCE, READ, ("Could not read CUDA module"),
-        ("%s: %s", self->module_location,
-            error ? error->message : "file is empty"));
-    return FALSE;
+  } else {
+    /* g_file_get_contents() adds the terminator required by PTX modules. */
+    if (!g_file_get_contents (location, &image, &image_size, &error) ||
+        image_size == 0) {
+      GST_ELEMENT_ERROR (self, RESOURCE, READ, ("Could not read CUDA module"),
+          ("%s: %s", location, error ? error->message : "file is empty"));
+      return FALSE;
+    }
+    module_data = image;
   }
 
   if (!gst_cuda_context_push (context)) {
@@ -231,19 +242,54 @@ gst_cuda_kernel_load_module (GstCudaKernel * self, GstCudaContext * context)
     return FALSE;
   }
 
-  result = CuModuleLoadData (&module, image);
+  result = CuModuleLoadData (&module, module_data);
   if (result == CUDA_SUCCESS) {
     operation = "cuModuleGetFunction";
     result = CuModuleGetFunction (&function, module, KERNEL_ENTRY);
   }
 
-  if (result == CUDA_SUCCESS && size) {
+  if (result != CUDA_SUCCESS) {
+    if (module)
+      CuModuleUnload (module);
+    gst_cuda_context_pop (NULL);
+    GST_ELEMENT_ERROR (self, LIBRARY, INIT, ("Could not initialize CUDA kernel"),
+        ("%s in %s (%s) returned CUDA error %d", operation,
+            location, KERNEL_ENTRY, result));
+    return FALSE;
+  }
+
+  gst_cuda_context_pop (NULL);
+  self->module_context = gst_object_ref (context);
+  self->module = module;
+  self->function = function;
+  return TRUE;
+}
+
+static gboolean
+gst_cuda_kernel_upload_parameters (GstCudaKernel * self, GBytes * bytes)
+{
+  gsize size = bytes ? g_bytes_get_size (bytes) : 0;
+  CUdeviceptr device_parameters = 0;
+  CUresult result = CUDA_SUCCESS;
+  const gchar *operation = NULL;
+
+  if (size > G_MAXUINT32) {
+    GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
+        ("CUDA kernel parameter block is too large"), (NULL));
+    return FALSE;
+  }
+  if (!gst_cuda_context_push (self->module_context)) {
+    GST_ELEMENT_ERROR (self, LIBRARY, INIT,
+        ("Could not activate CUDA context"), (NULL));
+    return FALSE;
+  }
+  if (size) {
     operation = "cuMemAlloc";
     result = CuMemAlloc (&device_parameters, size);
     if (result == CUDA_SUCCESS) {
       CUDA_MEMCPY2D copy = { 0, };
       copy.srcMemoryType = CU_MEMORYTYPE_HOST;
-      copy.srcHost = g_bytes_get_data (self->parameters, NULL);
+      copy.srcHost = g_bytes_get_data (bytes, NULL);
       copy.srcPitch = size;
       copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
       copy.dstDevice = device_parameters;
@@ -258,19 +304,16 @@ gst_cuda_kernel_load_module (GstCudaKernel * self, GstCudaContext * context)
   if (result != CUDA_SUCCESS) {
     if (device_parameters)
       CuMemFree (device_parameters);
-    if (module)
-      CuModuleUnload (module);
     gst_cuda_context_pop (NULL);
-    GST_ELEMENT_ERROR (self, LIBRARY, INIT, ("Could not initialize CUDA kernel"),
-        ("%s in %s (%s) returned CUDA error %d", operation,
-            self->module_location, KERNEL_ENTRY, result));
+    GST_ELEMENT_ERROR (self, LIBRARY, INIT,
+        ("Could not upload CUDA kernel parameters"),
+        ("%s returned CUDA error %d", operation, result));
     return FALSE;
   }
 
+  if (self->device_parameters)
+    CuMemFree (self->device_parameters);
   gst_cuda_context_pop (NULL);
-  self->module_context = gst_object_ref (context);
-  self->module = module;
-  self->function = function;
   self->device_parameters = device_parameters;
   self->parameters_size = (guint32) size;
   return TRUE;
@@ -336,6 +379,14 @@ gst_cuda_kernel_set_info (GstCudaBaseTransform * transform,
     GstCaps * incaps, GstVideoInfo * input, GstCaps * outcaps,
     GstVideoInfo * output)
 {
+  GstCudaKernel *self = GST_CUDA_KERNEL (transform);
+  gboolean new_context = self->module_context != transform->context;
+  gboolean geometry_changed = input->width != transform->in_info.width ||
+      input->height != transform->in_info.height ||
+      output->width != transform->out_info.width ||
+      output->height != transform->out_info.height;
+  g_autoptr (GBytes) parameters = NULL;
+
   if (GST_VIDEO_INFO_FORMAT (input) != GST_VIDEO_FORMAT_NV12 ||
       GST_VIDEO_INFO_FORMAT (output) != GST_VIDEO_FORMAT_NV12 ||
       input->interlace_mode != GST_VIDEO_INTERLACE_MODE_PROGRESSIVE ||
@@ -349,8 +400,32 @@ gst_cuda_kernel_set_info (GstCudaBaseTransform * transform,
     return FALSE;
   }
 
-  return gst_cuda_kernel_load_module (GST_CUDA_KERNEL (transform),
-      transform->context);
+  if (!gst_cuda_kernel_load_module (self, transform->context))
+    return FALSE;
+
+  if ((new_context || geometry_changed) &&
+      g_signal_has_handler_pending (self, prepare_parameters_signal, 0,
+          FALSE)) {
+    g_signal_emit (self, prepare_parameters_signal, 0,
+        (guint) input->width, (guint) input->height,
+        (guint) output->width, (guint) output->height, &parameters);
+    if (!parameters) {
+      GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
+          ("Could not prepare CUDA kernel parameters"), (NULL));
+      goto error;
+    }
+    if (!gst_cuda_kernel_upload_parameters (self, parameters))
+      goto error;
+  } else if (new_context && self->parameters &&
+      !gst_cuda_kernel_upload_parameters (self, self->parameters)) {
+    goto error;
+  }
+
+  return TRUE;
+
+error:
+  gst_cuda_kernel_clear_module (self);
+  return FALSE;
 }
 
 static gboolean
@@ -542,6 +617,10 @@ gst_cuda_kernel_class_init (GstCudaKernelClass * klass)
   g_object_class_install_property (object_class, PROP_MODULE_LOCATION,
       g_param_spec_string ("module-location", "Module location",
           "Path to a trusted PTX, cubin or fatbin module", NULL, flags));
+  g_object_class_install_property (object_class, PROP_MODULE_DATA,
+      g_param_spec_boxed ("module-data", "Module data",
+          "Trusted cubin or fatbin bytes, taking precedence over module-location",
+          G_TYPE_BYTES, flags));
   g_object_class_install_property (object_class, PROP_PARAMETERS,
       g_param_spec_boxed ("parameters", "Parameters",
           "Read-only parameter bytes copied to CUDA memory", G_TYPE_BYTES,
@@ -550,6 +629,25 @@ gst_cuda_kernel_class_init (GstCudaKernelClass * klass)
       g_param_spec_uint ("shared-memory", "Shared memory",
           "Dynamic shared memory bytes per CUDA thread block", 0, G_MAXUINT, 0,
           flags));
+
+  /**
+   * GstCudaKernel::prepare-parameters:
+   * @self: the CUDA kernel element
+   * @input_width: width of the input frame
+   * @input_height: height of the input frame
+   * @output_width: width of the output frame
+   * @output_height: height of the output frame
+   *
+   * Supplies parameters at caps negotiation when the geometry or CUDA
+   * context changes. Connect one handler before starting the pipeline.
+   * Its result takes precedence over the parameters property.
+   *
+   * Returns: (transfer full) (nullable): Parameter bytes or %NULL on failure
+   */
+  prepare_parameters_signal = g_signal_new ("prepare-parameters",
+      G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+      g_signal_accumulator_first_wins, NULL, NULL, G_TYPE_BYTES, 4,
+      G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT);
 
   gst_element_class_add_static_pad_template (element_class, &sink_template);
   gst_element_class_add_static_pad_template (element_class, &src_template);
