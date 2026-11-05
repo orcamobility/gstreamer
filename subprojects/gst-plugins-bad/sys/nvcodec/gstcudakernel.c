@@ -30,10 +30,10 @@
  * valid until the launch completes.
  *
  * Applications may provide a read-only parameter block as GBytes. The
- * device pointer and size are zero when the block is empty. A handler for
- * #GstCudaKernel::prepare-parameters can supply a new block when the frame
- * geometry changes. Module, parameters and dynamic shared memory settings
- * are configurable in READY.
+ * device pointer and size are zero when the block is empty. The
+ * `preset=lanczos` mode supplies its own module and parameters and updates
+ * the coefficients when the geometry changes. Module, parameters, preset
+ * and dynamic shared memory settings are configurable in READY.
  * A module runs in the pipeline's CUDA context with access to its memory.
  *
  * ## Example launch line
@@ -41,6 +41,9 @@
  * gst-launch-1.0 videotestsrc ! video/x-raw,format=NV12 ! cudaupload \
  *     ! cudakernel module-location=effect.ptx ! cudadownload ! autovideosink
  * ]|
+ *
+ * To use the built-in scaler, select `cudakernel preset=lanczos` and specify
+ * the output dimensions with downstream CUDA caps.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -48,6 +51,7 @@
 #endif
 
 #include "gstcudakernel.h"
+#include "gstcudakernellanczos.h"
 
 GST_DEBUG_CATEGORY_STATIC (gst_cuda_kernel_debug);
 #define GST_CAT_DEFAULT gst_cuda_kernel_debug
@@ -59,11 +63,34 @@ GST_DEBUG_CATEGORY_STATIC (gst_cuda_kernel_debug);
     "interlace-mode=(string)progressive, " \
     "width=(int)[2,2147483646,2], height=(int)[2,2147483646,2]"
 
+typedef enum
+{
+  GST_CUDA_KERNEL_PRESET_CUSTOM,
+  GST_CUDA_KERNEL_PRESET_LANCZOS,
+} GstCudaKernelPreset;
+
+static GType
+gst_cuda_kernel_preset_get_type (void)
+{
+  static gsize type = 0;
+  static const GEnumValue values[] = {
+    {GST_CUDA_KERNEL_PRESET_CUSTOM, "Custom module", "custom"},
+    {GST_CUDA_KERNEL_PRESET_LANCZOS, "Lanczos luma and linear chroma", "lanczos"},
+    {0, NULL, NULL}
+  };
+
+  if (g_once_init_enter (&type)) {
+    GType enum_type = g_enum_register_static ("GstCudaKernelPreset", values);
+    g_once_init_leave (&type, enum_type);
+  }
+  return type;
+}
+
 struct _GstCudaKernel
 {
   GstCudaBaseTransform parent;
   gchar *module_location;
-  GBytes *module_data;
+  GstCudaKernelPreset preset;
   GBytes *parameters;
   guint shared_memory;
 
@@ -78,12 +105,10 @@ enum
 {
   PROP_0,
   PROP_MODULE_LOCATION,
-  PROP_MODULE_DATA,
+  PROP_PRESET,
   PROP_PARAMETERS,
   PROP_SHARED_MEMORY,
 };
-
-static guint prepare_parameters_signal;
 
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK, GST_PAD_ALWAYS, GST_STATIC_CAPS (KERNEL_CAPS));
@@ -99,7 +124,7 @@ gst_cuda_kernel_set_property (GObject * object, guint prop_id,
 {
   GstCudaKernel *self = GST_CUDA_KERNEL (object);
   GstElement *element = GST_ELEMENT (object);
-  GBytes *old_bytes = NULL;
+  GBytes *old_parameters = NULL;
 
   GST_OBJECT_LOCK (element);
   if (GST_STATE (element) > GST_STATE_READY ||
@@ -114,12 +139,11 @@ gst_cuda_kernel_set_property (GObject * object, guint prop_id,
       g_free (self->module_location);
       self->module_location = g_value_dup_string (value);
       break;
-    case PROP_MODULE_DATA:
-      old_bytes = self->module_data;
-      self->module_data = g_value_dup_boxed (value);
+    case PROP_PRESET:
+      self->preset = g_value_get_enum (value);
       break;
     case PROP_PARAMETERS:
-      old_bytes = self->parameters;
+      old_parameters = self->parameters;
       self->parameters = g_value_dup_boxed (value);
       break;
     case PROP_SHARED_MEMORY:
@@ -130,7 +154,7 @@ gst_cuda_kernel_set_property (GObject * object, guint prop_id,
       break;
   }
   GST_OBJECT_UNLOCK (element);
-  g_clear_pointer (&old_bytes, g_bytes_unref);
+  g_clear_pointer (&old_parameters, g_bytes_unref);
 }
 
 static void
@@ -144,8 +168,8 @@ gst_cuda_kernel_get_property (GObject * object, guint prop_id,
     case PROP_MODULE_LOCATION:
       g_value_set_string (value, self->module_location);
       break;
-    case PROP_MODULE_DATA:
-      g_value_set_boxed (value, self->module_data);
+    case PROP_PRESET:
+      g_value_set_enum (value, self->preset);
       break;
     case PROP_PARAMETERS:
       g_value_set_boxed (value, self->parameters);
@@ -196,7 +220,6 @@ gst_cuda_kernel_finalize (GObject * object)
 
   gst_cuda_kernel_clear_module (self);
   g_free (self->module_location);
-  g_clear_pointer (&self->module_data, g_bytes_unref);
   g_clear_pointer (&self->parameters, g_bytes_unref);
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -218,12 +241,17 @@ gst_cuda_kernel_load_module (GstCudaKernel * self, GstCudaContext * context)
     return TRUE;
 
   gst_cuda_kernel_clear_module (self);
-  if (self->module_data && g_bytes_get_size (self->module_data)) {
-    module_data = g_bytes_get_data (self->module_data, NULL);
-    location = "(module-data)";
+  if (self->preset == GST_CUDA_KERNEL_PRESET_LANCZOS) {
+    module_data = gst_cuda_kernel_lanczos_program (context);
+    location = "Lanczos preset";
+    if (!module_data) {
+      GST_ELEMENT_ERROR (self, LIBRARY, INIT,
+          ("Could not compile the CUDA Lanczos kernel"), (NULL));
+      return FALSE;
+    }
   } else if (!location || !*location) {
     GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
-        ("A CUDA module-location or module-data is required"), (NULL));
+        ("A CUDA module-location is required"), (NULL));
     return FALSE;
   } else {
     /* g_file_get_contents() adds the terminator required by PTX modules. */
@@ -403,15 +431,12 @@ gst_cuda_kernel_set_info (GstCudaBaseTransform * transform,
   if (!gst_cuda_kernel_load_module (self, transform->context))
     return FALSE;
 
-  if ((new_context || geometry_changed) &&
-      g_signal_has_handler_pending (self, prepare_parameters_signal, 0,
-          FALSE)) {
-    g_signal_emit (self, prepare_parameters_signal, 0,
-        (guint) input->width, (guint) input->height,
-        (guint) output->width, (guint) output->height, &parameters);
+  if (self->preset == GST_CUDA_KERNEL_PRESET_LANCZOS &&
+      (new_context || geometry_changed)) {
+    parameters = gst_cuda_kernel_lanczos_parameters (input, output);
     if (!parameters) {
       GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
-          ("Could not prepare CUDA kernel parameters"), (NULL));
+          ("Could not prepare CUDA Lanczos coefficients"), (NULL));
       goto error;
     }
     if (!gst_cuda_kernel_upload_parameters (self, parameters))
@@ -572,7 +597,9 @@ gst_cuda_kernel_transform (GstBaseTransform * transform,
     result = CuLaunchKernel (self->function,
         (dst_width * channels + BLOCK_WIDTH - 1) / BLOCK_WIDTH,
         (dst_height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT, 1, BLOCK_WIDTH,
-        BLOCK_HEIGHT, 1, self->shared_memory, stream, args, NULL);
+        BLOCK_HEIGHT, 1,
+        self->preset == GST_CUDA_KERNEL_PRESET_CUSTOM ? self->shared_memory : 0,
+        stream, args, NULL);
     if (result != CUDA_SUCCESS)
       break;
   }
@@ -617,37 +644,19 @@ gst_cuda_kernel_class_init (GstCudaKernelClass * klass)
   g_object_class_install_property (object_class, PROP_MODULE_LOCATION,
       g_param_spec_string ("module-location", "Module location",
           "Path to a trusted PTX, cubin or fatbin module", NULL, flags));
-  g_object_class_install_property (object_class, PROP_MODULE_DATA,
-      g_param_spec_boxed ("module-data", "Module data",
-          "Trusted cubin or fatbin bytes, taking precedence over module-location",
-          G_TYPE_BYTES, flags));
+  g_object_class_install_property (object_class, PROP_PRESET,
+      g_param_spec_enum ("preset", "Kernel preset",
+          "Select a built-in kernel or load a custom module",
+          gst_cuda_kernel_preset_get_type (), GST_CUDA_KERNEL_PRESET_CUSTOM,
+          flags));
   g_object_class_install_property (object_class, PROP_PARAMETERS,
       g_param_spec_boxed ("parameters", "Parameters",
-          "Read-only parameter bytes copied to CUDA memory", G_TYPE_BYTES,
+          "Read-only parameter bytes for the custom preset", G_TYPE_BYTES,
           flags));
   g_object_class_install_property (object_class, PROP_SHARED_MEMORY,
       g_param_spec_uint ("shared-memory", "Shared memory",
-          "Dynamic shared memory bytes per CUDA thread block", 0, G_MAXUINT, 0,
-          flags));
-
-  /**
-   * GstCudaKernel::prepare-parameters:
-   * @self: the CUDA kernel element
-   * @input_width: width of the input frame
-   * @input_height: height of the input frame
-   * @output_width: width of the output frame
-   * @output_height: height of the output frame
-   *
-   * Supplies parameters at caps negotiation when the geometry or CUDA
-   * context changes. Connect one handler before starting the pipeline.
-   * Its result takes precedence over the parameters property.
-   *
-   * Returns: (transfer full) (nullable): Parameter bytes or %NULL on failure
-   */
-  prepare_parameters_signal = g_signal_new ("prepare-parameters",
-      G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
-      g_signal_accumulator_first_wins, NULL, NULL, G_TYPE_BYTES, 4,
-      G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT);
+          "Dynamic shared memory bytes per block for the custom preset",
+          0, G_MAXUINT, 0, flags));
 
   gst_element_class_add_static_pad_template (element_class, &sink_template);
   gst_element_class_add_static_pad_template (element_class, &src_template);
