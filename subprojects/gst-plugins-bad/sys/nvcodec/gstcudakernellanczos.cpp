@@ -17,6 +17,7 @@
     unsigned int taps; \
   }; \
   struct LanczosParameters { \
+    unsigned int direction; \
     LanczosAxis horizontal[2]; \
     LanczosAxis vertical[2]; \
   };
@@ -27,6 +28,28 @@ static const char lanczos_source[] = G_STRINGIFY (LANCZOS_LAYOUT) R"CUDA(
 namespace {
 constexpr int kBlockWidth = 32;
 constexpr int kTileRows = 128;
+
+__device__ void store_pixel(unsigned char* dst, unsigned long long pitch,
+                            unsigned int x, unsigned int y,
+                            unsigned int width, unsigned int height,
+                            unsigned int channels, unsigned int direction,
+                            unsigned char value) {
+  const unsigned int pixel = x / channels;
+  unsigned int dx = pixel;
+  unsigned int dy = y;
+  // GstVideoOrientationMethod's eight fixed orientations. Rotate pixel
+  // coordinates, keeping each interleaved UV pair in U,V order.
+  switch (direction) {
+    case 1: dx = height - 1 - y; dy = pixel; break;
+    case 2: dx = width - 1 - pixel; dy = height - 1 - y; break;
+    case 3: dx = y; dy = width - 1 - pixel; break;
+    case 4: dx = width - 1 - pixel; break;
+    case 5: dy = height - 1 - y; break;
+    case 6: dx = y; dy = pixel; break;
+    case 7: dx = height - 1 - y; dy = width - 1 - pixel; break;
+  }
+  dst[dy * pitch + dx * channels + x % channels] = value;
+}
 }  // namespace
 
 extern "C" __global__ void gst_cuda_kernel_v1(const unsigned char* src,
@@ -46,18 +69,20 @@ extern "C" __global__ void gst_cuda_kernel_v1(const unsigned char* src,
   const unsigned int y = y0 + threadIdx.y;
   const bool valid_x = x < dst_width * channels;
 
-  if (src_width == dst_width && src_height == dst_height) {
-    if (valid_x && y < dst_height) {
-      dst[y * dst_pitch + x] = src[y * src_pitch + x];
-    }
-    return;
-  }
-
   if (parameters_size < sizeof(LanczosParameters)) {
     return;
   }
   const LanczosParameters& geometry =
       *reinterpret_cast<const LanczosParameters*>(parameters);
+
+  if (src_width == dst_width && src_height == dst_height) {
+    if (valid_x && y < dst_height) {
+      store_pixel(dst, dst_pitch, x, y, dst_width, dst_height, channels,
+                  geometry.direction, src[y * src_pitch + x]);
+    }
+    return;
+  }
+
   const auto horizontal = geometry.horizontal[plane];
   const auto vertical = geometry.vertical[plane];
   const auto* x_offset =
@@ -111,8 +136,9 @@ extern "C" __global__ void gst_cuda_kernel_v1(const unsigned char* src,
     }
   }
   if (valid_x && y < dst_height) {
-    dst[y * dst_pitch + x] =
-        static_cast<unsigned char>(min(255, max(0, __float2int_rn(sum))));
+    store_pixel(dst, dst_pitch, x, y, dst_width, dst_height, channels,
+                geometry.direction,
+                static_cast<unsigned char>(min(255, max(0, __float2int_rn(sum)))));
   }
 }
 
@@ -179,12 +205,19 @@ append_axis (guint input, guint output, GstVideoResamplerMethod method,
 
 GBytes *
 gst_cuda_kernel_lanczos_parameters (const GstVideoInfo * input,
-    const GstVideoInfo * output)
+    const GstVideoInfo * output, GstVideoOrientationMethod direction)
 {
   LanczosParameters geometry = {};
+  guint width = output->width;
+  guint height = output->height;
 
-  if (input->width == output->width && input->height == output->height)
-    return g_bytes_new (NULL, 0);
+  if (gst_cuda_kernel_lanczos_swaps_axes (direction)) {
+    width = output->height;
+    height = output->width;
+  }
+  geometry.direction = direction;
+  if (input->width == width && input->height == height)
+    return g_bytes_new (&geometry, sizeof (geometry));
 
   g_autoptr (GByteArray) bytes = g_byte_array_new ();
   g_byte_array_set_size (bytes, sizeof (geometry));
@@ -192,13 +225,22 @@ gst_cuda_kernel_lanczos_parameters (const GstVideoInfo * input,
   for (guint plane = 0; plane < 2; plane++) {
     GstVideoResamplerMethod method = plane == 0
         ? GST_VIDEO_RESAMPLER_METHOD_LANCZOS : GST_VIDEO_RESAMPLER_METHOD_LINEAR;
-    if (!append_axis (input->width >> plane, output->width >> plane, method,
+    if (!append_axis (input->width >> plane, width >> plane, method,
             bytes, &geometry.horizontal[plane]) ||
-        !append_axis (input->height >> plane, output->height >> plane, method,
+        !append_axis (input->height >> plane, height >> plane, method,
             bytes, &geometry.vertical[plane]))
       return NULL;
   }
 
   memcpy (bytes->data, &geometry, sizeof (geometry));
   return g_byte_array_free_to_bytes (g_steal_pointer (&bytes));
+}
+
+gboolean
+gst_cuda_kernel_lanczos_swaps_axes (GstVideoOrientationMethod direction)
+{
+  return direction == GST_VIDEO_ORIENTATION_90R ||
+      direction == GST_VIDEO_ORIENTATION_90L ||
+      direction == GST_VIDEO_ORIENTATION_UL_LR ||
+      direction == GST_VIDEO_ORIENTATION_UR_LL;
 }

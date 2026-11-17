@@ -10,7 +10,9 @@ G_BEGIN_DECLS
 
 const gchar *gst_cuda_kernel_lanczos_program (GstCudaContext * context);
 GBytes *gst_cuda_kernel_lanczos_parameters (const GstVideoInfo * input,
-    const GstVideoInfo * output);
+    const GstVideoInfo * output, GstVideoOrientationMethod direction);
+
+gboolean gst_cuda_kernel_lanczos_swaps_axes (GstVideoOrientationMethod direction);
 
 G_END_DECLS
 

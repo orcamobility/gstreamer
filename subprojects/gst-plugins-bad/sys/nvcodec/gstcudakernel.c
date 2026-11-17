@@ -32,8 +32,8 @@
  * Applications may provide a read-only parameter block as GBytes. The
  * device pointer and size are zero when the block is empty. The
  * `preset=lanczos` mode supplies its own module and parameters and updates
- * the coefficients when the geometry changes. Module, parameters, preset
- * and dynamic shared memory settings are configurable in READY.
+ * the coefficients when the geometry changes. Module, parameters, preset,
+ * video direction and dynamic shared memory are configurable in READY.
  * A module runs in the pipeline's CUDA context with access to its memory.
  *
  * ## Example launch line
@@ -43,7 +43,10 @@
  * ]|
  *
  * To use the built-in scaler, select `cudakernel preset=lanczos` and specify
- * the output dimensions with downstream CUDA caps.
+ * the output dimensions with downstream CUDA caps. The Lanczos preset accepts
+ * the eight fixed GstVideoOrientationMethod values via `video-direction`.
+ * Rotation and flips are fused into the final write, without frame scratch.
+ * Downstream dimensions describe the image after orientation is applied.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -91,6 +94,8 @@ struct _GstCudaKernel
   GstCudaBaseTransform parent;
   gchar *module_location;
   GstCudaKernelPreset preset;
+  GstVideoOrientationMethod direction;
+  GstVideoOrientationMethod configured_direction;
   GBytes *parameters;
   guint shared_memory;
 
@@ -106,6 +111,7 @@ enum
   PROP_0,
   PROP_MODULE_LOCATION,
   PROP_PRESET,
+  PROP_VIDEO_DIRECTION,
   PROP_PARAMETERS,
   PROP_SHARED_MEMORY,
 };
@@ -142,6 +148,13 @@ gst_cuda_kernel_set_property (GObject * object, guint prop_id,
     case PROP_PRESET:
       self->preset = g_value_get_enum (value);
       break;
+    case PROP_VIDEO_DIRECTION:
+      if (g_value_get_enum (value) > GST_VIDEO_ORIENTATION_UR_LL) {
+        GST_WARNING_OBJECT (self, "Only fixed video directions are supported");
+        break;
+      }
+      self->direction = g_value_get_enum (value);
+      break;
     case PROP_PARAMETERS:
       old_parameters = self->parameters;
       self->parameters = g_value_dup_boxed (value);
@@ -170,6 +183,9 @@ gst_cuda_kernel_get_property (GObject * object, guint prop_id,
       break;
     case PROP_PRESET:
       g_value_set_enum (value, self->preset);
+      break;
+    case PROP_VIDEO_DIRECTION:
+      g_value_set_enum (value, self->direction);
       break;
     case PROP_PARAMETERS:
       g_value_set_boxed (value, self->parameters);
@@ -351,12 +367,22 @@ static GstCaps *
 gst_cuda_kernel_transform_caps (GstBaseTransform * transform,
     GstPadDirection direction, GstCaps * caps, GstCaps * filter)
 {
+  GstCudaKernel *self = GST_CUDA_KERNEL (transform);
   GstCaps *result = gst_caps_copy (caps);
   guint i;
 
   for (i = 0; i < gst_caps_get_size (result); i++) {
     GstStructure *structure = gst_caps_get_structure (result, i);
     gst_structure_remove_fields (structure, "width", "height", NULL);
+    if (gst_cuda_kernel_lanczos_swaps_axes (self->direction)) {
+      gint numerator, denominator;
+      if (gst_structure_get_fraction (structure, "pixel-aspect-ratio",
+              &numerator, &denominator) && numerator > 0)
+        gst_structure_set (structure, "pixel-aspect-ratio", GST_TYPE_FRACTION,
+            denominator, numerator, NULL);
+      else
+        gst_structure_remove_field (structure, "pixel-aspect-ratio");
+    }
   }
 
   if (filter) {
@@ -372,16 +398,24 @@ static GstCaps *
 gst_cuda_kernel_fixate_caps (GstBaseTransform * transform,
     GstPadDirection direction, GstCaps * caps, GstCaps * othercaps)
 {
+  GstCudaKernel *self = GST_CUDA_KERNEL (transform);
   GstStructure *target;
   GstVideoInfo info;
+  gint width, height;
 
   othercaps = gst_caps_make_writable (gst_caps_truncate (othercaps));
   if (gst_caps_is_empty (othercaps) || !gst_video_info_from_caps (&info, caps))
     return gst_caps_fixate (othercaps);
 
   target = gst_caps_get_structure (othercaps, 0);
-  gst_structure_fixate_field_nearest_int (target, "width", info.width);
-  gst_structure_fixate_field_nearest_int (target, "height", info.height);
+  width = info.width;
+  height = info.height;
+  if (gst_cuda_kernel_lanczos_swaps_axes (self->direction)) {
+    width = info.height;
+    height = info.width;
+  }
+  gst_structure_fixate_field_nearest_int (target, "width", width);
+  gst_structure_fixate_field_nearest_int (target, "height", height);
 
   /* Preserve the input interpretation when downstream leaves it unspecified. */
   if (direction == GST_PAD_SINK) {
@@ -415,6 +449,12 @@ gst_cuda_kernel_set_info (GstCudaBaseTransform * transform,
       output->height != transform->out_info.height;
   g_autoptr (GBytes) parameters = NULL;
 
+  if (self->preset != GST_CUDA_KERNEL_PRESET_LANCZOS &&
+      self->direction != GST_VIDEO_ORIENTATION_IDENTITY) {
+    GST_ERROR_OBJECT (self, "video-direction requires preset=lanczos");
+    return FALSE;
+  }
+
   if (GST_VIDEO_INFO_FORMAT (input) != GST_VIDEO_FORMAT_NV12 ||
       GST_VIDEO_INFO_FORMAT (output) != GST_VIDEO_FORMAT_NV12 ||
       input->interlace_mode != GST_VIDEO_INTERLACE_MODE_PROGRESSIVE ||
@@ -432,8 +472,10 @@ gst_cuda_kernel_set_info (GstCudaBaseTransform * transform,
     return FALSE;
 
   if (self->preset == GST_CUDA_KERNEL_PRESET_LANCZOS &&
-      (new_context || geometry_changed)) {
-    parameters = gst_cuda_kernel_lanczos_parameters (input, output);
+      (new_context || geometry_changed ||
+          self->direction != self->configured_direction)) {
+    parameters = gst_cuda_kernel_lanczos_parameters (input, output,
+        self->direction);
     if (!parameters) {
       GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
           ("Could not prepare CUDA Lanczos coefficients"), (NULL));
@@ -446,6 +488,7 @@ gst_cuda_kernel_set_info (GstCudaBaseTransform * transform,
     goto error;
   }
 
+  self->configured_direction = self->direction;
   return TRUE;
 
 error:
@@ -594,6 +637,14 @@ gst_cuda_kernel_transform (GstBaseTransform * transform,
       &src_height, &dst_width, &dst_height, &channels, &plane, &parameters,
       &self->parameters_size };
 
+    /* Filter in source-axis order, then rotate the final write. The output
+     * pitch still describes the negotiated, oriented allocation. */
+    if (self->preset == GST_CUDA_KERNEL_PRESET_LANCZOS &&
+        gst_cuda_kernel_lanczos_swaps_axes (self->direction)) {
+      dst_width = cuda->out_info.height >> plane;
+      dst_height = cuda->out_info.width >> plane;
+    }
+
     result = CuLaunchKernel (self->function,
         (dst_width * channels + BLOCK_WIDTH - 1) / BLOCK_WIDTH,
         (dst_height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT, 1, BLOCK_WIDTH,
@@ -652,6 +703,11 @@ gst_cuda_kernel_class_init (GstCudaKernelClass * klass)
   g_object_class_install_property (object_class, PROP_PARAMETERS,
       g_param_spec_boxed ("parameters", "Parameters",
           "Read-only parameter bytes for the custom preset", G_TYPE_BYTES,
+          flags));
+  g_object_class_install_property (object_class, PROP_VIDEO_DIRECTION,
+      g_param_spec_enum ("video-direction", "Video direction",
+          "Fixed rotation or flip for the Lanczos preset (no auto or custom)",
+          GST_TYPE_VIDEO_ORIENTATION_METHOD, GST_VIDEO_ORIENTATION_IDENTITY,
           flags));
   g_object_class_install_property (object_class, PROP_SHARED_MEMORY,
       g_param_spec_uint ("shared-memory", "Shared memory",
