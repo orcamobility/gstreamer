@@ -149,10 +149,6 @@ gst_cuda_kernel_set_property (GObject * object, guint prop_id,
       self->preset = g_value_get_enum (value);
       break;
     case PROP_VIDEO_DIRECTION:
-      if (g_value_get_enum (value) > GST_VIDEO_ORIENTATION_UR_LL) {
-        GST_WARNING_OBJECT (self, "Only fixed video directions are supported");
-        break;
-      }
       self->direction = g_value_get_enum (value);
       break;
     case PROP_PARAMETERS:
@@ -220,6 +216,33 @@ gst_cuda_kernel_clear_module (GstCudaKernel * self)
   self->device_parameters = 0;
   self->parameters_size = 0;
   gst_clear_object (&self->module_context);
+}
+
+static gboolean
+gst_cuda_kernel_start (GstBaseTransform * transform)
+{
+  GstCudaKernel *self = GST_CUDA_KERNEL (transform);
+
+  if (self->direction > GST_VIDEO_ORIENTATION_UR_LL) {
+    GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
+        ("Only fixed video directions are supported"), (NULL));
+    return FALSE;
+  }
+  if (self->preset != GST_CUDA_KERNEL_PRESET_LANCZOS &&
+      self->direction != GST_VIDEO_ORIENTATION_IDENTITY) {
+    GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
+        ("video-direction requires preset=lanczos"), (NULL));
+    return FALSE;
+  }
+  /* Larger dynamic allocations require a per-function opt-in, which this
+   * element does not request. Static module allocations can lower the limit. */
+  if (self->preset == GST_CUDA_KERNEL_PRESET_CUSTOM &&
+      self->shared_memory > 48 * 1024) {
+    GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
+        ("shared-memory must not exceed 48 KiB"), (NULL));
+    return FALSE;
+  }
+  return GST_BASE_TRANSFORM_CLASS (parent_class)->start (transform);
 }
 
 static gboolean
@@ -711,7 +734,7 @@ gst_cuda_kernel_class_init (GstCudaKernelClass * klass)
           flags));
   g_object_class_install_property (object_class, PROP_SHARED_MEMORY,
       g_param_spec_uint ("shared-memory", "Shared memory",
-          "Dynamic shared memory bytes per block for the custom preset",
+          "Dynamic shared memory bytes per block for the custom preset (max 48 KiB)",
           0, G_MAXUINT, 0, flags));
 
   gst_element_class_add_static_pad_template (element_class, &sink_template);
@@ -720,6 +743,7 @@ gst_cuda_kernel_class_init (GstCudaKernelClass * klass)
       "Filter/Video", "Apply a CUDA kernel to NV12 video", "Coram");
 
   transform_class->passthrough_on_same_caps = FALSE;
+  transform_class->start = gst_cuda_kernel_start;
   transform_class->stop = gst_cuda_kernel_stop;
   transform_class->transform_caps = gst_cuda_kernel_transform_caps;
   transform_class->fixate_caps = gst_cuda_kernel_fixate_caps;

@@ -165,7 +165,8 @@ gst_cuda_kernel_lanczos_program (GstCudaContext * context)
     program = gst_cuda_nvrtc_compile_cubin (lanczos_source, device);
     if (!program)
       program = gst_cuda_nvrtc_compile (lanczos_source);
-    g_hash_table_insert (programs, GUINT_TO_POINTER (device), program);
+    if (program)
+      g_hash_table_insert (programs, GUINT_TO_POINTER (device), program);
   }
   G_UNLOCK (lanczos_cache);
 
