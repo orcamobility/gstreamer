@@ -589,6 +589,7 @@ gst_cuda_kernel_transform (GstBaseTransform * transform,
   CUresult result = CUDA_SUCCESS, sync_result;
   CUstream stream;
   guint32 plane;
+  guint grid_x, grid_y, block_x, block_y;
 
   if (!self->function || self->module_context != cuda->context)
     return GST_FLOW_NOT_NEGOTIATED;
@@ -668,10 +669,15 @@ gst_cuda_kernel_transform (GstBaseTransform * transform,
       dst_height = cuda->out_info.width >> plane;
     }
 
-    result = CuLaunchKernel (self->function,
-        (dst_width * channels + BLOCK_WIDTH - 1) / BLOCK_WIDTH,
-        (dst_height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT, 1, BLOCK_WIDTH,
-        BLOCK_HEIGHT, 1,
+    grid_x = (dst_width * channels + BLOCK_WIDTH - 1) / BLOCK_WIDTH;
+    grid_y = (dst_height + BLOCK_HEIGHT - 1) / BLOCK_HEIGHT;
+    block_x = BLOCK_WIDTH;
+    block_y = BLOCK_HEIGHT;
+    if (self->preset == GST_CUDA_KERNEL_PRESET_LANCZOS)
+      gst_cuda_kernel_lanczos_launch_dims (dst_width * channels, dst_height,
+          &grid_x, &grid_y, &block_x, &block_y);
+    result = CuLaunchKernel (self->function, grid_x, grid_y, 1, block_x,
+        block_y, 1,
         self->preset == GST_CUDA_KERNEL_PRESET_CUSTOM ? self->shared_memory : 0,
         stream, args, NULL);
     if (result != CUDA_SUCCESS)

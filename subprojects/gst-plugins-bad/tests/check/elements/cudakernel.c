@@ -4,6 +4,7 @@
 #include <gst/check/gstharness.h>
 #include <gst/cuda/gstcudanvrtc.h>
 #include <gst/video/video.h>
+#include <math.h>
 #include <string.h>
 
 static GstHarness *
@@ -186,10 +187,66 @@ GST_START_TEST (test_lanczos_ready_direction)
 
 GST_END_TEST;
 
+/* Reference filter for one axis, written from the filter definition rather
+ * than from the element's coefficient code: Lanczos-3 for luma and a
+ * triangle (or bilinear when upscaling) for chroma, both widened by the
+ * scale factor when downscaling, evaluated analytically in double precision,
+ * normalised, with clamp-to-edge sampling. This is the CV-CUDA HQResize
+ * definition the element follows. */
+typedef struct
+{
+  guint n_taps;
+  gint *index;                  /* n_taps per output, already clamped */
+  gdouble *weight;
+} ReferenceAxis;
+
+static gdouble
+reference_sinc (gdouble x)
+{
+  return x == 0.0 ? 1.0 : sin (G_PI * x) / (G_PI * x);
+}
+
+static void
+reference_axis_init (ReferenceAxis * axis, guint in, guint out, gboolean luma)
+{
+  gdouble scale = (gdouble) in / out;
+  gboolean down = out < in;
+  /* half-width of the window, in source pixels */
+  gdouble half = luma ? 3.0 * MAX (1.0, down ? scale : 1.0) :
+      (down ? MAX (0.5, scale) : 1.0);
+  guint j, k;
+
+  axis->n_taps = (guint) ceil (2 * half) + 1;
+  axis->index = g_new (gint, out * axis->n_taps);
+  axis->weight = g_new0 (gdouble, out * axis->n_taps);
+  for (j = 0; j < out; j++) {
+    gdouble centre = (j + 0.5) * scale - 0.5, total = 0.0;
+    gint first = (gint) floor (centre - half);
+    for (k = 0; k < axis->n_taps; k++) {
+      gdouble t = fabs (first + (gint) k - centre) / half, w = 0.0;
+      if (t < 1.0)
+        w = luma ? reference_sinc (3.0 * t) * reference_sinc (t) : 1.0 - t;
+      axis->index[j * axis->n_taps + k] = CLAMP (first + (gint) k, 0,
+          (gint) in - 1);
+      axis->weight[j * axis->n_taps + k] = w;
+      total += w;
+    }
+    for (k = 0; k < axis->n_taps; k++)
+      axis->weight[j * axis->n_taps + k] /= total;
+  }
+}
+
+static void
+reference_axis_clear (ReferenceAxis * axis)
+{
+  g_free (axis->index);
+  g_free (axis->weight);
+}
+
 /* This oracle does not use the device parameters or the CUDA implementation.
- * It performs two separable passes in double precision with the public
- * resampler tables, quantizing only the coefficients to the GPU's FP32 input.
- * One code of tolerance allows FP32 accumulation and final rounding error. */
+ * It performs two separable passes in double precision. One code of
+ * tolerance covers FP32 accumulation, the element's tabulated Lanczos
+ * coefficients and final rounding. */
 static void
 check_numeric_output (GstBuffer * input, const GstVideoInfo * input_info,
     GstBuffer * output, const GstVideoInfo * output_info, gboolean chunked)
@@ -200,9 +257,7 @@ check_numeric_output (GstBuffer * input, const GstVideoInfo * input_info,
   fail_unless (gst_video_frame_map (&in, input_info, input, GST_MAP_READ));
   fail_unless (gst_video_frame_map (&out, output_info, output, GST_MAP_READ));
   for (plane = 0; plane < 2; plane++) {
-    GstVideoResampler horizontal = { 0 }, vertical = { 0 };
-    GstVideoResamplerMethod method = plane == 0 ?
-        GST_VIDEO_RESAMPLER_METHOD_LANCZOS : GST_VIDEO_RESAMPLER_METHOD_LINEAR;
+    ReferenceAxis horizontal, vertical;
     guint iw = input_info->width >> plane, ih = input_info->height >> plane;
     guint ow = output_info->width >> plane, oh = output_info->height >> plane;
     guint channels = plane + 1, x, y, c, k;
@@ -212,15 +267,19 @@ check_numeric_output (GstBuffer * input, const GstVideoInfo * input_info,
     gint dst_pitch = GST_VIDEO_FRAME_PLANE_STRIDE (&out, plane);
     gdouble *scratch = g_new (gdouble, ow * channels * ih);
 
-    fail_unless (gst_video_resampler_init (&horizontal, method,
-            GST_VIDEO_RESAMPLER_FLAG_NONE, ow, 0, 0.0, iw, ow, NULL));
-    fail_unless (gst_video_resampler_init (&vertical, method,
-            GST_VIDEO_RESAMPLER_FLAG_NONE, oh, 0, 0.0, ih, oh, NULL));
+    reference_axis_init (&horizontal, iw, ow, plane == 0);
+    reference_axis_init (&vertical, ih, oh, plane == 0);
     if (chunked) {
-      guint first = G_MAXUINT, last = 0;
-      for (y = 0; y < MIN (oh, 8); y++) {
-        first = MIN (first, vertical.offset[y]);
-        last = MAX (last, vertical.offset[y] + vertical.max_taps);
+      /* One 32-row output block must need more source rows than the
+       * kernel's 128-row tile, so the chunked path runs. */
+      gint first = G_MAXINT, last = 0;
+      for (y = 0; y < MIN (oh, 32); y++) {
+        for (k = 0; k < vertical.n_taps; k++) {
+          if (vertical.weight[y * vertical.n_taps + k] == 0.0)
+            continue;
+          first = MIN (first, vertical.index[y * vertical.n_taps + k]);
+          last = MAX (last, vertical.index[y * vertical.n_taps + k] + 1);
+        }
       }
       fail_unless (last - first > 128);
     }
@@ -228,10 +287,10 @@ check_numeric_output (GstBuffer * input, const GstVideoInfo * input_info,
       for (x = 0; x < ow; x++) {
         for (c = 0; c < channels; c++) {
           gdouble sum = 0.0;
-          for (k = 0; k < horizontal.max_taps; k++)
+          for (k = 0; k < horizontal.n_taps; k++)
             sum += src[y * src_pitch +
-                (horizontal.offset[x] + k) * channels + c] *
-                (gdouble) (gfloat) horizontal.taps[x * horizontal.max_taps + k];
+                horizontal.index[x * horizontal.n_taps + k] * channels + c] *
+                horizontal.weight[x * horizontal.n_taps + k];
           scratch[(y * ow + x) * channels + c] = sum;
         }
       }
@@ -241,10 +300,10 @@ check_numeric_output (GstBuffer * input, const GstVideoInfo * input_info,
         for (c = 0; c < channels; c++) {
           gdouble sum = 0.0;
           gint expected, actual = dst[y * dst_pitch + x * channels + c];
-          for (k = 0; k < vertical.max_taps; k++)
-            sum += scratch[((vertical.offset[y] + k) * ow + x) * channels + c] *
-                (gdouble) (gfloat) vertical.taps[y * vertical.max_taps + k];
-          expected = CLAMP ((gint) (sum + 0.5), 0, 255);
+          for (k = 0; k < vertical.n_taps; k++)
+            sum += scratch[(vertical.index[y * vertical.n_taps + k] * ow + x) *
+                channels + c] * vertical.weight[y * vertical.n_taps + k];
+          expected = CLAMP ((gint) floor (sum + 0.5), 0, 255);
           fail_unless (ABS (actual - expected) <= 1,
               "plane %u pixel %u,%u channel %u: got %d, oracle %d",
               plane, x, y, c, actual, expected);
@@ -252,8 +311,8 @@ check_numeric_output (GstBuffer * input, const GstVideoInfo * input_info,
       }
     }
     g_free (scratch);
-    gst_video_resampler_clear (&horizontal);
-    gst_video_resampler_clear (&vertical);
+    reference_axis_clear (&horizontal);
+    reference_axis_clear (&vertical);
   }
   gst_video_frame_unmap (&in);
   gst_video_frame_unmap (&out);
@@ -263,7 +322,7 @@ GST_START_TEST (test_lanczos_numeric)
 {
   const guint sizes[][4] = {
     {68, 36, 44, 26}, {68, 36, 30, 18}, {68, 36, 68, 26},
-    {64, 1080, 64, 8}
+    {64, 1080, 64, 8}, {36, 20, 68, 36}
   };
   guint size, frame;
 
