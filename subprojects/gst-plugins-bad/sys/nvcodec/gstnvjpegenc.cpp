@@ -215,22 +215,26 @@ struct GstNvJpegEncPrivate
   nvjpegHandle_t handle = nullptr;
   nvjpegEncoderState_t state = nullptr;
   nvjpegEncoderParams_t params = nullptr;
-  nvjpegChromaSubsampling_t subsampling;
+  nvjpegChromaSubsampling_t subsampling = NVJPEG_CSS_UNKNOWN;
+  nvjpegChromaSubsampling_t active_subsampling = NVJPEG_CSS_UNKNOWN;
 
   CUmodule module = nullptr;
   CUfunction kernel_func = nullptr;
   bool launch_kernel = false;
 
   CUdeviceptr uv[2] = { 0, };
-  gint pitch;
+  gint pitch = 0;
+  gsize uv_alloc_size = 0;
 
   GstVideoInfo info;
+  GstVideoInfo pool_info;
   GstBufferPool *pool = nullptr;
   GstBuffer *fallback_buf = nullptr;
 
   std::recursive_mutex lock;
   guint quality = DEFAULT_JPEG_QUALITY;
   bool quality_updated = false;
+  bool need_reconfig = true;
   gboolean use_stream_ordered = FALSE;
   guint cuda_device_id = 0;
 };
@@ -588,6 +592,9 @@ gst_nv_jpeg_enc_reset (GstNvJpegEnc * self)
   priv->state = nullptr;
   priv->params = nullptr;
   priv->handle = nullptr;
+  priv->active_subsampling = NVJPEG_CSS_UNKNOWN;
+  priv->uv_alloc_size = 0;
+  priv->pitch = 0;
   priv->launch_kernel = false;
 
   gst_clear_buffer (&priv->fallback_buf);
@@ -755,33 +762,45 @@ gst_nv_jpeg_enc_propose_allocation (GstVideoEncoder * encoder, GstQuery * query)
 }
 
 static gboolean
-gst_nv_jpeg_enc_prepare_kernel_resource (GstNvJpegEnc * self)
+gst_nv_jpeg_enc_ensure_uv_scratch (GstNvJpegEnc * self, gint uv_width,
+    gint uv_height, gint * out_pitch)
 {
   auto priv = self->priv;
-
-  if (!priv->launch_kernel)
-    return TRUE;
 
   if (!gst_nv_jpeg_enc_load_module (self))
     return FALSE;
 
+  gsize pitch = GST_ROUND_UP_16 ((gsize) uv_width);
+  gsize needed = pitch * (gsize) uv_height;
+  if (priv->uv[0] && priv->uv[1] && needed <= priv->uv_alloc_size) {
+    *out_pitch = (gint) pitch;
+    return TRUE;
+  }
+
   auto stream = gst_cuda_stream_get_handle (priv->stream);
-  auto width = (priv->info.width + 1) / 2;
-  auto height = (priv->info.height + 1) / 2;
-  size_t pitch;
+  gboolean need_sync = FALSE;
+  for (guint i = 0; i < G_N_ELEMENTS (priv->uv); i++) {
+    if (priv->uv[i]) {
+      if (priv->use_stream_ordered) {
+        CuMemFreeAsync (priv->uv[i], stream);
+        need_sync = TRUE;
+      } else {
+        CuMemFree (priv->uv[i]);
+      }
+      priv->uv[i] = 0;
+    }
+  }
+  priv->uv_alloc_size = 0;
+
   CUresult ret = CUDA_SUCCESS;
-
   if (priv->use_stream_ordered) {
-    gint texture_align = gst_cuda_context_get_texture_alignment (priv->context);
-    pitch = ((width + texture_align - 1) / texture_align) * texture_align;
-
-    ret = CuMemAllocAsync (&priv->uv[0], pitch * height, stream);
+    ret = CuMemAllocAsync (&priv->uv[0], needed, stream);
     if (!gst_cuda_result (ret)) {
       GST_ERROR_OBJECT (self, "Couldn't allocate U plane memory");
       return FALSE;
     }
 
-    ret = CuMemAllocAsync (&priv->uv[1], pitch * height, stream);
+    ret = CuMemAllocAsync (&priv->uv[1], needed, stream);
     if (!gst_cuda_result (ret)) {
       GST_ERROR_OBJECT (self, "Couldn't allocate V plane memory");
       return FALSE;
@@ -792,22 +811,40 @@ gst_nv_jpeg_enc_prepare_kernel_resource (GstNvJpegEnc * self)
       return FALSE;
     }
   } else {
-    ret = CuMemAllocPitch (&priv->uv[0], &pitch, width, height, 16);
+    if (need_sync)
+      CuStreamSynchronize (stream);
+
+    ret = CuMemAlloc (&priv->uv[0], needed);
     if (!gst_cuda_result (ret)) {
       GST_ERROR_OBJECT (self, "Couldn't allocate U plane memory");
       return FALSE;
     }
 
-    ret = CuMemAllocPitch (&priv->uv[1], &pitch, width, height, 16);
+    ret = CuMemAlloc (&priv->uv[1], needed);
     if (!gst_cuda_result (ret)) {
       GST_ERROR_OBJECT (self, "Couldn't allocate V plane memory");
       return FALSE;
     }
   }
 
-  priv->pitch = pitch;
+  priv->uv_alloc_size = needed;
+  priv->pitch = (gint) pitch;
+  *out_pitch = (gint) pitch;
 
   return TRUE;
+}
+
+static gboolean
+gst_nv_jpeg_enc_prepare_kernel_resource (GstNvJpegEnc * self)
+{
+  auto priv = self->priv;
+
+  if (!priv->launch_kernel)
+    return TRUE;
+
+  gint pitch = 0;
+  return gst_nv_jpeg_enc_ensure_uv_scratch (self,
+      (priv->info.width + 1) / 2, (priv->info.height + 1) / 2, &pitch);
 }
 
 static gboolean
@@ -816,54 +853,66 @@ gst_nv_jpeg_enc_init_session (GstNvJpegEnc * self, GstBuffer * in_buf)
   auto klass = GST_NV_JPEG_ENC_GET_CLASS (self);
   auto priv = self->priv;
 
-  gst_nv_jpeg_enc_reset (self);
-
   if (klass->autogpu) {
     if (!in_buf) {
       GST_DEBUG_OBJECT (self, "Open session later for auto gpu mode");
       return TRUE;
     }
 
-    std::lock_guard < std::recursive_mutex > lk (priv->lock);
-    if (priv->module) {
-      gst_cuda_context_push (priv->context);
-      CuModuleUnload (priv->module);
-      priv->module = nullptr;
-      gst_cuda_context_pop (nullptr);
-    }
-
-    gst_clear_cuda_stream (&priv->stream);
-    gst_clear_object (&priv->context);
-
     auto mem = gst_buffer_peek_memory (in_buf, 0);
+    GstCudaContext *target_ctx = nullptr;
+    GstCudaStream *target_stream = nullptr;
     if (gst_is_cuda_memory (mem)) {
       auto cmem = GST_CUDA_MEMORY_CAST (mem);
-      priv->context = (GstCudaContext *) gst_object_ref (cmem->context);
-      guint device_id = 0;
-      g_object_get (priv->context, "cuda-device-id", &device_id, nullptr);
+      target_ctx = cmem->context;
+      target_stream = gst_cuda_memory_get_stream (cmem);
+    }
 
-      GST_DEBUG_OBJECT (self, "Upstream is CUDA with device id %d", device_id);
-
-      if (device_id != priv->cuda_device_id) {
-        priv->cuda_device_id = device_id;
-        g_object_notify (G_OBJECT (self), "cuda-device-id");
+    bool same_context = (priv->handle != nullptr) &&
+        ((target_ctx && priv->context == target_ctx) ||
+         (!target_ctx && priv->context != nullptr));
+    if (!same_context) {
+      gst_nv_jpeg_enc_reset (self);
+      std::lock_guard < std::recursive_mutex > lk (priv->lock);
+      if (priv->module) {
+        gst_cuda_context_push (priv->context);
+        CuModuleUnload (priv->module);
+        priv->module = nullptr;
+        gst_cuda_context_pop (nullptr);
       }
 
-      priv->stream = gst_cuda_memory_get_stream (cmem);
-      if (priv->stream)
-        gst_cuda_stream_ref (priv->stream);
-    } else {
-      GST_DEBUG_OBJECT (self, "Upstream is not CUDA");
-      if (!gst_cuda_ensure_element_context (GST_ELEMENT_CAST (self),
-              priv->cuda_device_id, &priv->context)) {
-        GST_ERROR_OBJECT (self, "Couldn't create CUDA context");
-        return FALSE;
-      }
+      gst_clear_cuda_stream (&priv->stream);
+      gst_clear_object (&priv->context);
 
-      priv->stream = gst_cuda_stream_new (priv->context);
+      if (target_ctx) {
+        priv->context = (GstCudaContext *) gst_object_ref (target_ctx);
+        guint device_id = 0;
+        g_object_get (priv->context, "cuda-device-id", &device_id, nullptr);
+
+        GST_DEBUG_OBJECT (self, "Upstream is CUDA with device id %d",
+            device_id);
+
+        if (device_id != priv->cuda_device_id) {
+          priv->cuda_device_id = device_id;
+          g_object_notify (G_OBJECT (self), "cuda-device-id");
+        }
+
+        if (target_stream)
+          priv->stream = gst_cuda_stream_ref (target_stream);
+      } else {
+        GST_DEBUG_OBJECT (self, "Upstream is not CUDA");
+        if (!gst_cuda_ensure_element_context (GST_ELEMENT_CAST (self),
+                priv->cuda_device_id, &priv->context)) {
+          GST_ERROR_OBJECT (self, "Couldn't create CUDA context");
+          return FALSE;
+        }
+
+        priv->stream = gst_cuda_stream_new (priv->context);
+      }
     }
   }
 
+  priv->launch_kernel = false;
   switch (GST_VIDEO_INFO_FORMAT (&priv->info)) {
     case GST_VIDEO_FORMAT_I420:
       priv->subsampling = NVJPEG_CSS_420;
@@ -883,20 +932,76 @@ gst_nv_jpeg_enc_init_session (GstNvJpegEnc * self, GstBuffer * in_buf)
       return FALSE;
   }
 
-  priv->use_stream_ordered = FALSE;
-  g_object_get (priv->context, "prefer-stream-ordered-alloc",
-      &priv->use_stream_ordered, nullptr);
-  if (!priv->use_stream_ordered)
-    priv->use_stream_ordered = default_stream_ordered_alloc_enabled ();
-
+  if (priv->pool && !gst_video_info_is_equal (&priv->pool_info, &priv->info)) {
+    gst_clear_buffer (&priv->fallback_buf);
+    gst_buffer_pool_set_active (priv->pool, FALSE);
+    gst_clear_object (&priv->pool);
+  }
 
   std::lock_guard < std::recursive_mutex > lk (priv->lock);
-  priv->quality_updated = false;
 
   if (!gst_cuda_context_push (priv->context)) {
     GST_ERROR_OBJECT (self, "Couldn't push context");
     gst_nv_jpeg_enc_reset (self);
     return FALSE;
+  }
+
+  auto stream = gst_cuda_stream_get_handle (priv->stream);
+  if (!priv->handle) {
+    priv->use_stream_ordered = FALSE;
+    g_object_get (priv->context, "prefer-stream-ordered-alloc",
+        &priv->use_stream_ordered, nullptr);
+    if (!priv->use_stream_ordered)
+      priv->use_stream_ordered = default_stream_ordered_alloc_enabled ();
+
+    priv->quality_updated = false;
+
+    auto ret = g_vtable.NvjpegCreateSimple (&priv->handle);
+    if (ret != NVJPEG_STATUS_SUCCESS) {
+      GST_ERROR_OBJECT (self, "Couldn't create encoder handle");
+      gst_cuda_context_pop (nullptr);
+      gst_nv_jpeg_enc_reset (self);
+      return FALSE;
+    }
+
+    ret = g_vtable.NvjpegEncoderParamsCreate (priv->handle, &priv->params,
+        stream);
+    if (ret != NVJPEG_STATUS_SUCCESS) {
+      GST_ERROR_OBJECT (self, "Couldn't create param handle, ret %d", ret);
+      gst_cuda_context_pop (nullptr);
+      gst_nv_jpeg_enc_reset (self);
+      return FALSE;
+    }
+
+    ret = g_vtable.NvjpegEncoderParamsSetQuality (priv->params,
+        priv->quality, stream);
+    if (ret != NVJPEG_STATUS_SUCCESS) {
+      GST_ERROR_OBJECT (self, "Couldn't set quality, ret %d", ret);
+      gst_cuda_context_pop (nullptr);
+      gst_nv_jpeg_enc_reset (self);
+      return FALSE;
+    }
+
+    ret = g_vtable.NvjpegEncoderStateCreate (priv->handle, &priv->state,
+        stream);
+    if (ret != NVJPEG_STATUS_SUCCESS) {
+      GST_ERROR_OBJECT (self, "Couldn't create state handle, ret %d", ret);
+      gst_cuda_context_pop (nullptr);
+      gst_nv_jpeg_enc_reset (self);
+      return FALSE;
+    }
+  }
+
+  if (priv->active_subsampling != priv->subsampling) {
+    auto ret = g_vtable.NvjpegEncoderParamsSetSamplingFactors (priv->params,
+        priv->subsampling, stream);
+    if (ret != NVJPEG_STATUS_SUCCESS) {
+      GST_ERROR_OBJECT (self, "Couldn't set subsampling factor, ret %d", ret);
+      gst_cuda_context_pop (nullptr);
+      gst_nv_jpeg_enc_reset (self);
+      return FALSE;
+    }
+    priv->active_subsampling = priv->subsampling;
   }
 
   if (!gst_nv_jpeg_enc_prepare_kernel_resource (self)) {
@@ -905,72 +1010,8 @@ gst_nv_jpeg_enc_init_session (GstNvJpegEnc * self, GstBuffer * in_buf)
     return FALSE;
   }
 
-  auto ret = g_vtable.NvjpegCreateSimple (&priv->handle);
-  if (ret != NVJPEG_STATUS_SUCCESS) {
-    GST_ERROR_OBJECT (self, "Couldn't create encoder handle");
-    gst_cuda_context_pop (nullptr);
-    gst_nv_jpeg_enc_reset (self);
-    return FALSE;
-  }
-
-  auto stream = gst_cuda_stream_get_handle (priv->stream);
-  ret = g_vtable.NvjpegEncoderParamsCreate (priv->handle, &priv->params,
-      stream);
-  if (ret != NVJPEG_STATUS_SUCCESS) {
-    GST_ERROR_OBJECT (self, "Couldn't create param handle, ret %d", ret);
-    gst_cuda_context_pop (nullptr);
-    gst_nv_jpeg_enc_reset (self);
-    return FALSE;
-  }
-
-  ret = g_vtable.NvjpegEncoderParamsSetQuality (priv->params,
-      priv->quality, stream);
-  if (ret != NVJPEG_STATUS_SUCCESS) {
-    GST_ERROR_OBJECT (self, "Couldn't set quality, ret %d", ret);
-    gst_cuda_context_pop (nullptr);
-    gst_nv_jpeg_enc_reset (self);
-    return FALSE;
-  }
-
-  ret = g_vtable.NvjpegEncoderParamsSetSamplingFactors (priv->params,
-      priv->subsampling, stream);
-  if (ret != NVJPEG_STATUS_SUCCESS) {
-    GST_ERROR_OBJECT (self, "Couldn't set subsampling factor, ret %d", ret);
-    gst_cuda_context_pop (nullptr);
-    gst_nv_jpeg_enc_reset (self);
-    return FALSE;
-  }
-
-  ret = g_vtable.NvjpegEncoderStateCreate (priv->handle, &priv->state, stream);
   gst_cuda_context_pop (nullptr);
-  if (ret != NVJPEG_STATUS_SUCCESS) {
-    GST_ERROR_OBJECT (self, "Couldn't create state handle, ret %d", ret);
-    gst_nv_jpeg_enc_reset (self);
-    return FALSE;
-  }
-
-  priv->pool = gst_cuda_buffer_pool_new (priv->context);
-  auto config = gst_buffer_pool_get_config (priv->pool);
-  auto caps = gst_video_info_to_caps (&priv->info);
-  gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
-  gst_buffer_pool_config_set_params (config, caps, priv->info.size, 0, 0);
-  gst_caps_unref (caps);
-
-  if (priv->stream)
-    gst_buffer_pool_config_set_cuda_stream (config, priv->stream);
-
-  if (!gst_buffer_pool_set_config (priv->pool, config)) {
-    GST_ERROR_OBJECT (self, "Failed to set pool config");
-    gst_nv_jpeg_enc_reset (self);
-    return FALSE;
-  }
-
-  if (!gst_buffer_pool_set_active (priv->pool, TRUE)) {
-    GST_ERROR_OBJECT (self, "Pool set active failed");
-    gst_nv_jpeg_enc_reset (self);
-    return FALSE;
-  }
-
+  priv->need_reconfig = false;
   return TRUE;
 }
 
@@ -982,6 +1023,7 @@ gst_nv_jpeg_enc_set_format (GstVideoEncoder * encoder,
   auto priv = self->priv;
 
   priv->info = state->info;
+  priv->need_reconfig = true;
 
   auto caps = gst_caps_new_empty_simple ("image/jpeg");
   auto output_state = gst_video_encoder_set_output_state (encoder, caps,
@@ -996,6 +1038,32 @@ gst_nv_jpeg_enc_upload_system (GstNvJpegEnc * self, GstBuffer * buffer)
 {
   auto priv = self->priv;
   auto info = &priv->info;
+
+  if (!priv->pool) {
+    priv->pool = gst_cuda_buffer_pool_new (priv->context);
+    auto config = gst_buffer_pool_get_config (priv->pool);
+    auto caps = gst_video_info_to_caps (info);
+    gst_buffer_pool_config_add_option (config,
+        GST_BUFFER_POOL_OPTION_VIDEO_META);
+    gst_buffer_pool_config_set_params (config, caps, info->size, 0, 0);
+    gst_caps_unref (caps);
+
+    if (priv->stream)
+      gst_buffer_pool_config_set_cuda_stream (config, priv->stream);
+
+    if (!gst_buffer_pool_set_config (priv->pool, config)) {
+      GST_ERROR_OBJECT (self, "Failed to set upload pool config");
+      gst_clear_object (&priv->pool);
+      return nullptr;
+    }
+
+    if (!gst_buffer_pool_set_active (priv->pool, TRUE)) {
+      GST_ERROR_OBJECT (self, "Upload pool set active failed");
+      gst_clear_object (&priv->pool);
+      return nullptr;
+    }
+    priv->pool_info = *info;
+  }
 
   if (!priv->fallback_buf) {
     gst_buffer_pool_acquire_buffer (priv->pool, &priv->fallback_buf, nullptr);
@@ -1115,8 +1183,8 @@ gst_nv_jpeg_enc_handle_frame (GstVideoEncoder * encoder,
   auto self = GST_NV_JPEG_ENC (encoder);
   auto priv = self->priv;
 
-  if (!priv->handle && !gst_nv_jpeg_enc_init_session (self,
-          frame->input_buffer)) {
+  if ((!priv->handle || priv->need_reconfig) &&
+      !gst_nv_jpeg_enc_init_session (self, frame->input_buffer)) {
     gst_video_encoder_finish_frame (encoder, frame);
     return GST_FLOW_ERROR;
   }
