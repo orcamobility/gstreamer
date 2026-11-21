@@ -226,6 +226,12 @@ struct GstNvJpegEncPrivate
   gint pitch = 0;
   gsize uv_alloc_size = 0;
 
+  /* High-water-mark 256-byte-aligned scratch planes for cropped sub-rects whose
+   * source pointer is not 8-byte aligned (nvjpegEncodeYUV requires 8-byte
+   * channel alignment on vectorized 8x8 DCT paths). */
+  CUdeviceptr align_scratch[3] = { 0, };
+  gsize align_alloc_size[3] = { 0, };
+
   GstVideoInfo info;
   GstVideoInfo pool_info;
   GstBufferPool *pool = nullptr;
@@ -582,6 +588,18 @@ gst_nv_jpeg_enc_reset (GstNvJpegEnc * self)
         priv->uv[i] = 0;
       }
     }
+    for (guint i = 0; i < G_N_ELEMENTS (priv->align_scratch); i++) {
+      if (priv->align_scratch[i]) {
+        if (priv->use_stream_ordered) {
+          CuMemFreeAsync (priv->align_scratch[i], stream);
+          need_sync = TRUE;
+        } else {
+          CuMemFree (priv->align_scratch[i]);
+        }
+        priv->align_scratch[i] = 0;
+      }
+      priv->align_alloc_size[i] = 0;
+    }
 
     if (need_sync)
       CuStreamSynchronize (stream);
@@ -709,6 +727,8 @@ gst_nv_jpeg_enc_propose_allocation (GstVideoEncoder * encoder, GstQuery * query)
     /* Use upstream pool in case of auto select mode. We don't know which
      * GPU to use at this moment */
     gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, nullptr);
+    gst_query_add_allocation_meta (query, GST_VIDEO_CROP_META_API_TYPE,
+        nullptr);
     return TRUE;
   }
 
@@ -756,11 +776,13 @@ gst_nv_jpeg_enc_propose_allocation (GstVideoEncoder * encoder, GstQuery * query)
 
   gst_query_add_allocation_pool (query, pool, size, 0, 0);
   gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, nullptr);
+  gst_query_add_allocation_meta (query, GST_VIDEO_CROP_META_API_TYPE, nullptr);
   gst_object_unref (pool);
 
   return TRUE;
 }
 
+/* Caller should push context */
 static gboolean
 gst_nv_jpeg_enc_ensure_uv_scratch (GstNvJpegEnc * self, gint uv_width,
     gint uv_height, gint * out_pitch)
@@ -868,6 +890,7 @@ gst_nv_jpeg_enc_init_session (GstNvJpegEnc * self, GstBuffer * in_buf)
       target_stream = gst_cuda_memory_get_stream (cmem);
     }
 
+    /* Only reset when CUDA context changes or no session exists yet. */
     bool same_context = (priv->handle != nullptr) &&
         ((target_ctx && priv->context == target_ctx) ||
          (!target_ctx && priv->context != nullptr));
@@ -899,6 +922,8 @@ gst_nv_jpeg_enc_init_session (GstNvJpegEnc * self, GstBuffer * in_buf)
 
         if (target_stream)
           priv->stream = gst_cuda_stream_ref (target_stream);
+        else
+          priv->stream = gst_cuda_stream_new (priv->context);
       } else {
         GST_DEBUG_OBJECT (self, "Upstream is not CUDA");
         if (!gst_cuda_ensure_element_context (GST_ELEMENT_CAST (self),
@@ -932,6 +957,7 @@ gst_nv_jpeg_enc_init_session (GstNvJpegEnc * self, GstBuffer * in_buf)
       return FALSE;
   }
 
+  /* Invalidate lazy system-memory upload pool if format/dimensions changed. */
   if (priv->pool && !gst_video_info_is_equal (&priv->pool_info, &priv->info)) {
     gst_clear_buffer (&priv->fallback_buf);
     gst_buffer_pool_set_active (priv->pool, FALSE);
@@ -1107,14 +1133,96 @@ gst_nv_jpeg_enc_upload (GstNvJpegEnc * self, GstBuffer * buffer)
 #define CUDA_BLOCK_Y 16
 #define DIV_UP(size,block) (((size) + ((block) - 1)) / (block))
 
+/* Caller should push context. Copies an unaligned cropped plane into a
+ * high-water-mark 256-byte-aligned scratch buffer when its device pointer does
+ * not meet nvjpegEncodeYUV's 8-byte alignment requirement. */
+static gboolean
+gst_nv_jpeg_enc_align_plane (GstNvJpegEnc * self, guint plane_idx,
+    unsigned char ** io_ptr, size_t * io_pitch, gint width, gint height)
+{
+  if (((guintptr) (*io_ptr) & 7) == 0)
+    return TRUE;
+
+  auto priv = self->priv;
+  auto stream = gst_cuda_stream_get_handle (priv->stream);
+  gsize dst_pitch = GST_ROUND_UP_16 ((gsize) width);
+  gsize needed = dst_pitch * (gsize) height;
+
+  if (!priv->align_scratch[plane_idx] ||
+      needed > priv->align_alloc_size[plane_idx]) {
+    if (priv->align_scratch[plane_idx]) {
+      if (priv->use_stream_ordered) {
+        CuMemFreeAsync (priv->align_scratch[plane_idx], stream);
+      } else {
+        CuMemFree (priv->align_scratch[plane_idx]);
+      }
+      priv->align_scratch[plane_idx] = 0;
+      priv->align_alloc_size[plane_idx] = 0;
+    }
+
+    CUresult ret = priv->use_stream_ordered
+        ? CuMemAllocAsync (&priv->align_scratch[plane_idx], needed, stream)
+        : CuMemAlloc (&priv->align_scratch[plane_idx], needed);
+    if (!gst_cuda_result (ret)) {
+      GST_ERROR_OBJECT (self, "Couldn't allocate aligned plane scratch");
+      return FALSE;
+    }
+    priv->align_alloc_size[plane_idx] = needed;
+  }
+
+  CUDA_MEMCPY2D cp = { };
+  cp.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+  cp.srcDevice = (CUdeviceptr) (*io_ptr);
+  cp.srcPitch = *io_pitch;
+  cp.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+  cp.dstDevice = priv->align_scratch[plane_idx];
+  cp.dstPitch = dst_pitch;
+  cp.WidthInBytes = (size_t) width;
+  cp.Height = (size_t) height;
+  if (!gst_cuda_result (CuMemcpy2DAsync (&cp, stream))) {
+    GST_ERROR_OBJECT (self, "Couldn't align cropped plane %u", plane_idx);
+    return FALSE;
+  }
+
+  *io_ptr = (unsigned char *) priv->align_scratch[plane_idx];
+  *io_pitch = dst_pitch;
+  return TRUE;
+}
+
 static gboolean
 gst_nv_jpeg_enc_fill_source (GstNvJpegEnc * self, GstBuffer * buffer,
-    nvjpegImage_t * source)
+    nvjpegImage_t * source, gint * out_width, gint * out_height)
 {
   auto priv = self->priv;
   auto upload = gst_nv_jpeg_enc_upload (self, buffer);
   if (!upload)
     return FALSE;
+
+  gint crop_x = 0;
+  gint crop_y = 0;
+  gint crop_w = priv->info.width;
+  gint crop_h = priv->info.height;
+  auto crop = gst_buffer_get_video_crop_meta (buffer);
+  if (crop) {
+    crop_x = MIN ((gint) crop->x, priv->info.width);
+    crop_y = MIN ((gint) crop->y, priv->info.height);
+    crop_w = MIN ((gint) crop->width, priv->info.width - crop_x);
+    crop_h = MIN ((gint) crop->height, priv->info.height - crop_y);
+    if (priv->subsampling == NVJPEG_CSS_420) {
+      crop_x &= ~1;
+      crop_y &= ~1;
+      crop_w &= ~1;
+      crop_h &= ~1;
+    } else if (priv->subsampling == NVJPEG_CSS_422) {
+      crop_x &= ~1;
+      crop_w &= ~1;
+    }
+    if (crop_w < 2 || crop_h < 2) {
+      GST_ERROR_OBJECT (self, "Degenerate crop region %dx%d at (%d,%d)",
+          crop_w, crop_h, crop_x, crop_y);
+      return FALSE;
+    }
+  }
 
   GstVideoFrame frame;
   if (!gst_video_frame_map (&frame,
@@ -1124,54 +1232,71 @@ gst_nv_jpeg_enc_fill_source (GstNvJpegEnc * self, GstBuffer * buffer,
   }
 
   if (priv->launch_kernel) {
-    CUtexObject texture;
-    auto cmem = (GstCudaMemory *) gst_buffer_peek_memory (upload, 0);
-    if (!gst_cuda_memory_get_texture (cmem,
-            1, CU_TR_FILTER_MODE_POINT, &texture)) {
-      GST_ERROR_OBJECT (self, "Couldn't get texture");
+    gint uv_w = crop_w / 2;
+    gint uv_h = crop_h / 2;
+    gint out_stride = 0;
+    if (!gst_nv_jpeg_enc_ensure_uv_scratch (self, uv_w, uv_h, &out_stride)) {
       gst_video_frame_unmap (&frame);
       return FALSE;
     }
 
-    gint width = priv->info.width / 2;
-    gint height = priv->info.height / 2;
-    gpointer args[] = { &texture, &priv->uv[0], &priv->uv[1], &width, &height,
-      &priv->pitch
+    gint in_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&frame, 1);
+    CUdeviceptr in_uv = (CUdeviceptr) (
+        (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&frame, 1) +
+        (gsize) (crop_y / 2) * in_stride + crop_x);
+    gpointer args[] = { &in_uv, &in_stride, &priv->uv[0], &priv->uv[1],
+      &uv_w, &uv_h, &out_stride
     };
 
-    if (!gst_cuda_context_push (priv->context)) {
-      GST_ERROR_OBJECT (self, "Couldn't push context");
-      gst_video_frame_unmap (&frame);
-      return FALSE;
-    }
-
     auto stream = gst_cuda_stream_get_handle (priv->stream);
-    auto ret = CuLaunchKernel (priv->kernel_func, DIV_UP (width, CUDA_BLOCK_X),
-        DIV_UP (height, CUDA_BLOCK_Y), 1, CUDA_BLOCK_X, CUDA_BLOCK_Y, 1, 0,
+    auto ret = CuLaunchKernel (priv->kernel_func, DIV_UP (uv_w, CUDA_BLOCK_X),
+        DIV_UP (uv_h, CUDA_BLOCK_Y), 1, CUDA_BLOCK_X, CUDA_BLOCK_Y, 1, 0,
         stream, args, nullptr);
-    gst_cuda_context_pop (nullptr);
     if (!gst_cuda_result (ret)) {
       GST_ERROR_OBJECT (self, "Couldn't launch kernel");
       gst_video_frame_unmap (&frame);
       return FALSE;
     }
 
+    gint y_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&frame, 0);
     source->channel[0] = (unsigned char *)
-        GST_VIDEO_FRAME_PLANE_DATA (&frame, 0);
-    source->pitch[0] = GST_VIDEO_FRAME_PLANE_STRIDE (&frame, 0);
+        GST_VIDEO_FRAME_PLANE_DATA (&frame, 0) +
+        (gsize) crop_y * y_stride + crop_x;
+    source->pitch[0] = y_stride;
+    if (!gst_nv_jpeg_enc_align_plane (self, 0, &source->channel[0],
+            &source->pitch[0], crop_w, crop_h)) {
+      gst_video_frame_unmap (&frame);
+      return FALSE;
+    }
 
     source->channel[1] = (unsigned char *) priv->uv[0];
     source->channel[2] = (unsigned char *) priv->uv[1];
-    source->pitch[1] = source->pitch[2] = priv->pitch;
+    source->pitch[1] = source->pitch[2] = out_stride;
   } else {
+    gint h_shift = (priv->subsampling == NVJPEG_CSS_420 ||
+        priv->subsampling == NVJPEG_CSS_422) ? 1 : 0;
+    gint v_shift = (priv->subsampling == NVJPEG_CSS_420) ? 1 : 0;
     for (guint i = 0; i < GST_VIDEO_FRAME_N_PLANES (&frame); i++) {
+      gint stride = GST_VIDEO_FRAME_PLANE_STRIDE (&frame, i);
+      gint px = (i == 0) ? crop_x : (crop_x >> h_shift);
+      gint py = (i == 0) ? crop_y : (crop_y >> v_shift);
+      gint pw = (i == 0) ? crop_w : (crop_w >> h_shift);
+      gint ph = (i == 0) ? crop_h : (crop_h >> v_shift);
       source->channel[i] = (unsigned char *)
-          GST_VIDEO_FRAME_PLANE_DATA (&frame, i);
-      source->pitch[i] = GST_VIDEO_FRAME_PLANE_STRIDE (&frame, i);
+          GST_VIDEO_FRAME_PLANE_DATA (&frame, i) + (gsize) py * stride + px;
+      source->pitch[i] = stride;
+      if (!gst_nv_jpeg_enc_align_plane (self, i, &source->channel[i],
+              &source->pitch[i], pw, ph)) {
+        gst_video_frame_unmap (&frame);
+        return FALSE;
+      }
     }
   }
 
   gst_video_frame_unmap (&frame);
+
+  *out_width = crop_w;
+  *out_height = crop_h;
 
   return TRUE;
 }
@@ -1213,7 +1338,10 @@ gst_nv_jpeg_enc_handle_frame (GstVideoEncoder * encoder,
   }
 
   nvjpegImage_t source = { };
-  if (!gst_nv_jpeg_enc_fill_source (self, frame->input_buffer, &source)) {
+  gint encode_width = priv->info.width;
+  gint encode_height = priv->info.height;
+  if (!gst_nv_jpeg_enc_fill_source (self, frame->input_buffer, &source,
+          &encode_width, &encode_height)) {
     GST_ERROR_OBJECT (self, "Couldn't fill source struct");
     gst_cuda_context_pop (nullptr);
     gst_video_encoder_finish_frame (encoder, frame);
@@ -1222,9 +1350,15 @@ gst_nv_jpeg_enc_handle_frame (GstVideoEncoder * encoder,
   }
 
   auto ret = g_vtable.NvjpegEncodeYUV (priv->handle, priv->state, priv->params,
-      &source, priv->subsampling, priv->info.width, priv->info.height, stream);
+      &source, priv->subsampling, encode_width, encode_height, stream);
   if (ret != NVJPEG_STATUS_SUCCESS) {
-    GST_ERROR_OBJECT (self, "nvjpegEncodeYUV failed, ret: %d", ret);
+    GST_ERROR_OBJECT (self,
+        "nvjpegEncodeYUV failed, ret: %d (enc=%dx%d info=%dx%d sub=%d q=%u "
+        "pitch=%zu/%zu/%zu ch=%p/%p/%p)",
+        ret, encode_width, encode_height, priv->info.width, priv->info.height,
+        (int) priv->subsampling, priv->quality, source.pitch[0],
+        source.pitch[1], source.pitch[2], source.channel[0], source.channel[1],
+        source.channel[2]);
     gst_cuda_context_pop (nullptr);
     gst_video_encoder_finish_frame (encoder, frame);
     return GST_FLOW_ERROR;
