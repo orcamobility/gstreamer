@@ -2235,6 +2235,26 @@ gst_ffmpegviddec_video_frame (GstFFMpegVidDec * ffmpegdec,
     g_list_free (ol);
   }
 
+  /* H.264/H.265 reference pictures are read-only after output. Keeping the
+   * write map forces a full image copy when the decoder updates metadata. */
+  if (out_dframe->mapped &&
+      (ffmpegdec->context->codec_id == AV_CODEC_ID_H264 ||
+          ffmpegdec->context->codec_id == AV_CODEC_ID_HEVC) &&
+      gst_buffer_n_memory (out_dframe->vframe.buffer) == 1 &&
+      gst_memory_is_type (gst_buffer_peek_memory (out_dframe->vframe.buffer, 0),
+          GST_ALLOCATOR_SYSMEM)) {
+    GstBuffer *buffer = gst_buffer_ref (out_dframe->vframe.buffer);
+    GstVideoInfo info = out_dframe->vframe.info;
+    gpointer pixels = GST_VIDEO_FRAME_PLANE_DATA (&out_dframe->vframe, 0);
+
+    gst_video_frame_unmap (&out_dframe->vframe);
+    out_dframe->mapped = gst_video_frame_map (&out_dframe->vframe, &info,
+        buffer, GST_MAP_READ);
+    gst_buffer_unref (buffer);
+    g_assert (out_dframe->mapped);
+    g_assert (pixels == GST_VIDEO_FRAME_PLANE_DATA (&out_dframe->vframe, 0));
+  }
+
   av_frame_unref (ffmpegdec->picture);
 
   if (input_frame)
