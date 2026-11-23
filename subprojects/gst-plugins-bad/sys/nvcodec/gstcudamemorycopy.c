@@ -73,6 +73,9 @@ struct _GstCudaMemoryCopy
 
   gboolean downstream_supports_video_meta;
 
+  guint8 *pinned_staging;
+  gsize pinned_staging_size;
+
 #ifdef HAVE_CUDA_GST_GL
   GstGLDisplay *gl_display;
   GstGLContext *gl_context;
@@ -221,8 +224,17 @@ gst_cuda_memory_copy_set_context (GstElement * element, GstContext * context)
 static gboolean
 gst_cuda_memory_copy_transform_stop (GstBaseTransform * trans)
 {
-#if defined(HAVE_CUDA_GST_GL) || defined(G_OS_WIN32)
   GstCudaMemoryCopy *self = GST_CUDA_MEMORY_COPY (trans);
+  GstCudaBaseTransform *ctrans = GST_CUDA_BASE_TRANSFORM (trans);
+
+  if (self->pinned_staging) {
+    if (ctrans->context && gst_cuda_context_push (ctrans->context)) {
+      CuMemFreeHost (self->pinned_staging);
+      gst_cuda_context_pop (NULL);
+    }
+    self->pinned_staging = NULL;
+    self->pinned_staging_size = 0;
+  }
 
 #ifdef HAVE_CUDA_GST_GL
   gst_clear_object (&self->gl_display);
@@ -231,7 +243,6 @@ gst_cuda_memory_copy_transform_stop (GstBaseTransform * trans)
 #endif
 #ifdef G_OS_WIN32
   gst_clear_object (&self->d3d11_device);
-#endif
 #endif
 
   return GST_BASE_TRANSFORM_CLASS (parent_class)->stop (trans);
@@ -884,6 +895,129 @@ gst_cuda_memory_copy_set_info (GstCudaBaseTransform * btrans,
   return TRUE;
 }
 
+/* Stage pageable system memory through a reusable pinned host buffer before
+ * CuMemcpy2DAsync so concurrent cudaupload threads do not hold libcuda's
+ * primary-context read lock across synchronous pageable copies and starve
+ * writers (cuMemAllocPitch, cuStreamCreate, cuModuleLoadData, NVDEC/NVENC). */
+static gboolean
+gst_cuda_memory_copy_upload_pinned (GstCudaMemoryCopy * self,
+    GstCudaBaseTransform * ctrans, GstBuffer * outbuf, GstVideoInfo * out_info,
+    GstBuffer * inbuf, GstVideoInfo * in_info)
+{
+  GstVideoFrame in_frame, out_frame;
+  guint n_planes, i, y;
+  gsize plane_offsets[GST_VIDEO_MAX_PLANES];
+  gsize plane_row_bytes[GST_VIDEO_MAX_PLANES];
+  gsize plane_heights[GST_VIDEO_MAX_PLANES];
+  gsize total_bytes = 0;
+  CUstream cu_stream = NULL;
+  gboolean ret = FALSE;
+
+  if (!gst_video_frame_map (&in_frame, in_info, inbuf, GST_MAP_READ))
+    return FALSE;
+
+  n_planes = GST_VIDEO_FRAME_N_PLANES (&in_frame);
+  if (n_planes == 0 || n_planes > GST_VIDEO_MAX_PLANES) {
+    gst_video_frame_unmap (&in_frame);
+    return FALSE;
+  }
+
+  for (i = 0; i < n_planes; i++) {
+    gsize row_bytes = GST_VIDEO_FRAME_COMP_WIDTH (&in_frame, i) *
+        GST_VIDEO_FRAME_COMP_PSTRIDE (&in_frame, i);
+    gsize height = GST_VIDEO_FRAME_COMP_HEIGHT (&in_frame, i);
+    plane_row_bytes[i] = row_bytes;
+    plane_heights[i] = height;
+    total_bytes = (total_bytes + 255) & ~(gsize) 255;
+    plane_offsets[i] = total_bytes;
+    total_bytes += row_bytes * height;
+  }
+
+  if (total_bytes == 0) {
+    gst_video_frame_unmap (&in_frame);
+    return FALSE;
+  }
+
+  if (total_bytes > self->pinned_staging_size) {
+    if (!gst_cuda_context_push (ctrans->context)) {
+      gst_video_frame_unmap (&in_frame);
+      return FALSE;
+    }
+    if (self->pinned_staging) {
+      CuMemFreeHost (self->pinned_staging);
+      self->pinned_staging = NULL;
+      self->pinned_staging_size = 0;
+    }
+    if (CuMemAllocHost ((void **) &self->pinned_staging,
+            total_bytes) != CUDA_SUCCESS) {
+      self->pinned_staging = NULL;
+      self->pinned_staging_size = 0;
+      gst_cuda_context_pop (NULL);
+      gst_video_frame_unmap (&in_frame);
+      return FALSE;
+    }
+    self->pinned_staging_size = total_bytes;
+    gst_cuda_context_pop (NULL);
+  }
+
+  /* Copy pageable planes into pinned staging outside any CUDA driver lock. */
+  for (i = 0; i < n_planes; i++) {
+    const guint8 *src = GST_VIDEO_FRAME_PLANE_DATA (&in_frame, i);
+    gint src_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&in_frame, i);
+    guint8 *dst = self->pinned_staging + plane_offsets[i];
+    gsize row_bytes = plane_row_bytes[i];
+    gsize height = plane_heights[i];
+
+    if ((gsize) src_stride == row_bytes) {
+      memcpy (dst, src, row_bytes * height);
+    } else {
+      for (y = 0; y < height; y++) {
+        memcpy (dst + y * row_bytes, src + y * src_stride, row_bytes);
+      }
+    }
+  }
+  gst_video_frame_unmap (&in_frame);
+
+  if (!gst_video_frame_map (&out_frame, out_info, outbuf,
+          GST_MAP_WRITE | GST_MAP_CUDA)) {
+    return FALSE;
+  }
+
+  if (!gst_cuda_context_push (ctrans->context)) {
+    gst_video_frame_unmap (&out_frame);
+    return FALSE;
+  }
+
+  if (ctrans->stream)
+    cu_stream = gst_cuda_stream_get_handle (ctrans->stream);
+
+  ret = TRUE;
+  for (i = 0; i < n_planes; i++) {
+    CUDA_MEMCPY2D params;
+    memset (&params, 0, sizeof (params));
+    params.srcMemoryType = CU_MEMORYTYPE_HOST;
+    params.srcHost = self->pinned_staging + plane_offsets[i];
+    params.srcPitch = plane_row_bytes[i];
+    params.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    params.dstDevice = (CUdeviceptr) GST_VIDEO_FRAME_PLANE_DATA (&out_frame, i);
+    params.dstPitch = GST_VIDEO_FRAME_PLANE_STRIDE (&out_frame, i);
+    params.WidthInBytes = plane_row_bytes[i];
+    params.Height = plane_heights[i];
+
+    if (!gst_cuda_result (CuMemcpy2DAsync (&params, cu_stream))) {
+      ret = FALSE;
+      break;
+    }
+  }
+
+  if (ret)
+    gst_cuda_result (CuStreamSynchronize (cu_stream));
+
+  gst_cuda_context_pop (NULL);
+  gst_video_frame_unmap (&out_frame);
+  return ret;
+}
+
 static GstFlowReturn
 gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
     GstBuffer * outbuf)
@@ -967,8 +1101,15 @@ gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
     return GST_FLOW_OK;
   }
 
-  ret = gst_cuda_buffer_copy (outbuf, out_type, out_info, inbuf, in_type,
-      in_info, ctrans->context, ctrans->stream);
+  if (in_type == GST_CUDA_BUFFER_COPY_SYSTEM &&
+      out_type == GST_CUDA_BUFFER_COPY_CUDA) {
+    ret = gst_cuda_memory_copy_upload_pinned (self, ctrans, outbuf, out_info,
+        inbuf, in_info);
+  }
+  if (!ret) {
+    ret = gst_cuda_buffer_copy (outbuf, out_type, out_info, inbuf, in_type,
+        in_info, ctrans->context, ctrans->stream);
+  }
 
   /* system memory <-> CUDA copy fallback if possible */
   if (!ret) {
