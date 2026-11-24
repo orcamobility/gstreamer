@@ -62,6 +62,9 @@ struct _GstRtpH264Depay
   guint16 last_fu_seqnum;
   GstClockTime fu_timestamp;
   gboolean fu_marker;
+  guint8 fu_nal_header;
+  guint32 fu_rtptime;
+  gboolean repeated_fu_start_detected;
 
   /* misc */
   GPtrArray *sps;
@@ -77,6 +80,7 @@ struct _GstRtpH264Depay
   gboolean waiting_for_keyframe;
   gboolean requesting_keyframe;
   guint max_fragmentation_unit_size;
+  gboolean ignore_repeated_fu_start;
 
   /* saved RTP buffer for video meta re-application across NAL reassembly */
   GstBuffer *meta_buf;

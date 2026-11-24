@@ -42,6 +42,7 @@ GST_DEBUG_CATEGORY_STATIC (rtph264depay_debug);
 #define DEFAULT_WAIT_FOR_KEYFRAME FALSE
 #define DEFAULT_REQUEST_KEYFRAME FALSE
 #define DEFAULT_MAX_FRAGMENTATION_UNIT_SIZE (32 * 1024 * 1024)
+#define DEFAULT_IGNORE_REPEATED_FU_START TRUE
 
 enum
 {
@@ -49,6 +50,7 @@ enum
   PROP_WAIT_FOR_KEYFRAME,
   PROP_REQUEST_KEYFRAME,
   PROP_MAX_FRAGMENTATION_UNIT_SIZE,
+  PROP_IGNORE_REPEATED_FU_START,
 };
 
 
@@ -131,6 +133,9 @@ gst_rtp_h264_depay_set_property (GObject * object, guint prop_id,
     case PROP_MAX_FRAGMENTATION_UNIT_SIZE:
       self->max_fragmentation_unit_size = g_value_get_uint (value);
       break;
+    case PROP_IGNORE_REPEATED_FU_START:
+      self->ignore_repeated_fu_start = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -152,6 +157,9 @@ gst_rtp_h264_depay_get_property (GObject * object, guint prop_id,
       break;
     case PROP_MAX_FRAGMENTATION_UNIT_SIZE:
       g_value_set_uint (value, self->max_fragmentation_unit_size);
+      break;
+    case PROP_IGNORE_REPEATED_FU_START:
+      g_value_set_boolean (value, self->ignore_repeated_fu_start);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -221,6 +229,22 @@ gst_rtp_h264_depay_class_init (GstRtpH264DepayClass * klass)
           G_MAXUINT, DEFAULT_MAX_FRAGMENTATION_UNIT_SIZE,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * GstRtpH264Depay:ignore-repeated-fu-start:
+   *
+   * Detect repeated FU-A Start bits by checking the slice type in a packet
+   * that could be a continuation. After detecting an invalid slice type,
+   * treat subsequent matching packets as continuations.
+   *
+   * Since: 1.30
+   */
+  g_object_class_install_property (gobject_class, PROP_IGNORE_REPEATED_FU_START,
+      g_param_spec_boolean ("ignore-repeated-fu-start",
+          "Ignore Repeated FU-A Start",
+          "Detect and ignore repeated FU-A Start bits",
+          DEFAULT_IGNORE_REPEATED_FU_START,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gst_element_class_add_static_pad_template (gstelement_class,
       &gst_rtp_h264_depay_src_template);
   gst_element_class_add_static_pad_template (gstelement_class,
@@ -247,6 +271,7 @@ gst_rtp_h264_depay_init (GstRtpH264Depay * rtph264depay)
   rtph264depay->picture_adapter = gst_adapter_new ();
   rtph264depay->byte_stream = DEFAULT_BYTE_STREAM;
   rtph264depay->merge = DEFAULT_ACCESS_UNIT;
+  rtph264depay->ignore_repeated_fu_start = DEFAULT_IGNORE_REPEATED_FU_START;
   rtph264depay->sps = g_ptr_array_new_with_free_func (
       (GDestroyNotify) gst_buffer_unref);
   rtph264depay->pps = g_ptr_array_new_with_free_func (
@@ -269,6 +294,7 @@ gst_rtp_h264_depay_reset (GstRtpH264Depay * rtph264depay, gboolean hard)
   rtph264depay->last_keyframe = FALSE;
   rtph264depay->last_ts = 0;
   rtph264depay->current_fu_type = 0;
+  rtph264depay->repeated_fu_start_detected = FALSE;
   rtph264depay->new_codec_data = FALSE;
   g_ptr_array_set_size (rtph264depay->sps, 0);
   g_ptr_array_set_size (rtph264depay->pps, 0);
@@ -1242,6 +1268,49 @@ gst_rtp_h264_finish_fragmentation_unit (GstRtpH264Depay * rtph264depay)
     gst_rtp_base_depayload_flush (GST_RTP_BASE_DEPAYLOAD (rtph264depay), FALSE);
 }
 
+/* Interpret the FU payload as a slice header and read slice_type.
+ * Return TRUE if slice_type is outside the valid range of 0 to 9.
+ * The caller can use this as evidence that the Start bit was set incorrectly. */
+static gboolean
+gst_rtp_h264_fu_start_has_invalid_slice_type (guint8 nal_header,
+    const guint8 * data, guint size)
+{
+  guint8 prefix[16];
+  guint prefix_size = 0;
+  guint zeros = 0;
+  guint32 slice_type, first_mb;
+  guint nal_type = nal_header & 0x1f;
+  GstBitReader br;
+
+  /* Slice type nalus */
+  if (nal_type != 1 && nal_type != 2 && nal_type != 5)
+    return FALSE;
+
+  /* Read only the RBSP prefix containing first_mb_in_slice and slice_type */
+  for (guint i = 0; i < size && prefix_size < sizeof (prefix); i++) {
+    guint8 byte = data[i];
+
+    /* Drop EPB */
+    if (zeros == 2 && byte == 3) {
+      zeros = 0;
+      continue;
+    }
+
+    prefix[prefix_size] = byte;
+    prefix_size++;
+
+    /* Update zero run-length */
+    if (byte == 0)
+      zeros++;
+    else
+      zeros = 0;
+  }
+
+  gst_bit_reader_init (&br, prefix, prefix_size);
+  return gst_rtp_read_golomb (&br, &first_mb) &&
+      gst_rtp_read_golomb (&br, &slice_type) && slice_type > 9;
+}
+
 static GstBuffer *
 gst_rtp_h264_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
 {
@@ -1494,6 +1563,9 @@ gst_rtp_h264_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
         /* FU-A      Fragmentation unit                 5.8 */
         /* FU-B      Fragmentation unit                 5.8 */
         gboolean S, E;
+        guint8 nal_header;
+        guint16 seqnum;
+        guint32 rtptime;
 
         guint fu_hdr_size = (nal_unit_type == 28) ? 2 : 4;
 
@@ -1511,15 +1583,52 @@ gst_rtp_h264_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
         S = (payload[1] & 0x80) == 0x80;
         E = (payload[1] & 0x40) == 0x40;
 
+        nal_header = (payload[0] & 0xe0) | (payload[1] & 0x1f);
+        seqnum = gst_rtp_buffer_get_seq (rtp);
+        rtptime = gst_rtp_buffer_get_timestamp (rtp);
+
         GST_DEBUG_OBJECT (rtph264depay, "S %d, E %d", S, E);
+
+        /* If the workaround is enabled, treat a repeated Start as a
+         * continuation when all of these hold.
+         * - An FU-A is in progress and the new packet is also FU-A.
+         * - The new packet has S=1 and E=0.
+         * - The previous packet has no RTP marker.
+         * - The RTP timestamp and NAL header match.
+         * - The RTP seqnums are consecutive.
+         *
+         * A new slice after a missing End bit can also match these conditions.
+         * Require an invalid slice type before enabling the workaround for
+         * this stream. */
+        if (rtph264depay->ignore_repeated_fu_start && S && !E &&
+            nal_unit_type == 28 && rtph264depay->current_fu_type == 28 &&
+            !rtph264depay->fu_marker &&
+            rtptime == rtph264depay->fu_rtptime &&
+            nal_header == rtph264depay->fu_nal_header &&
+            gst_rtp_buffer_compare_seqnum (rtph264depay->last_fu_seqnum,
+                seqnum) == 1) {
+
+
+          if (!rtph264depay->repeated_fu_start_detected &&
+              gst_rtp_h264_fu_start_has_invalid_slice_type (nal_header,
+                  payload + fu_hdr_size, payload_len - fu_hdr_size)) {
+            rtph264depay->repeated_fu_start_detected = TRUE;
+            GST_DEBUG_OBJECT (rtph264depay,
+                "Detected repeated FU-A Start at sequence number %u", seqnum);
+          }
+
+          if (rtph264depay->repeated_fu_start_detected) {
+            GST_DEBUG_OBJECT (rtph264depay,
+                "Ignoring repeated FU-A Start at sequence number %u", seqnum);
+            S = FALSE;
+          }
+        }
 
         if (rtph264depay->wait_start && !S)
           goto waiting_start;
 
         if (S) {
           /* NAL unit starts here */
-          guint8 nal_header;
-
           /* If a new FU unit started, while still processing an older one.
            * Assume that the remote payloader is buggy (doesn't set the end
            * bit) and send out what we've gathered thusfar */
@@ -1530,12 +1639,11 @@ gst_rtp_h264_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
 
           rtph264depay->current_fu_type = nal_unit_type;
           rtph264depay->fu_timestamp = timestamp;
-          rtph264depay->last_fu_seqnum = gst_rtp_buffer_get_seq (rtp);
+          rtph264depay->fu_rtptime = rtptime;
+          rtph264depay->fu_nal_header = nal_header;
+          rtph264depay->last_fu_seqnum = seqnum;
 
           rtph264depay->wait_start = FALSE;
-
-          /* reconstruct NAL header */
-          nal_header = (payload[0] & 0xe0) | (payload[1] & 0x1f);
 
           /* Strip type header, FU header, and FU-B DON (if present) */
           payload += fu_hdr_size;
@@ -1579,12 +1687,11 @@ gst_rtp_h264_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
             return NULL;
           }
           if (gst_rtp_buffer_compare_seqnum (rtph264depay->last_fu_seqnum,
-                  gst_rtp_buffer_get_seq (rtp)) != 1) {
+                  seqnum) != 1) {
             /* jump in sequence numbers within an FU is cause for discarding */
             GST_WARNING_OBJECT (rtph264depay, "Jump in sequence numbers from "
                 "%u to %u within Fragmentation Unit. Data was lost, dropping "
-                "stored.", rtph264depay->last_fu_seqnum,
-                gst_rtp_buffer_get_seq (rtp));
+                "stored.", rtph264depay->last_fu_seqnum, seqnum);
             rtph264depay->wait_start = TRUE;
             rtph264depay->current_fu_type = 0;
             rtph264depay->last_fu_seqnum = 0;
@@ -1593,7 +1700,7 @@ gst_rtp_h264_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
             gst_adapter_clear (rtph264depay->adapter);
             return NULL;
           }
-          rtph264depay->last_fu_seqnum = gst_rtp_buffer_get_seq (rtp);
+          rtph264depay->last_fu_seqnum = seqnum;
 
           /* strip off FU indicator, FU header bytes and FU-B DON (if present) */
           payload += fu_hdr_size;
@@ -1711,6 +1818,9 @@ gst_rtp_h264_depay_handle_event (GstRTPBaseDepayload * depay, GstEvent * event)
   rtph264depay = GST_RTP_H264_DEPAY (depay);
 
   switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_STREAM_START:
+      rtph264depay->repeated_fu_start_detected = FALSE;
+      break;
     case GST_EVENT_FLUSH_STOP:
       gst_rtp_h264_depay_reset (rtph264depay, FALSE);
       break;
