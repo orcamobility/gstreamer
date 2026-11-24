@@ -42,6 +42,7 @@
 #endif
 #include "gstcudamemorycopy.h"
 #include "gstcudaconvertscale.h"
+#include "gstcudakernel.h"
 #include <gst/cuda/gstcudanvmm-private.h>
 
 #ifdef G_OS_WIN32
@@ -943,6 +944,8 @@ plugin_init (GstPlugin * plugin)
 #endif
 
   gst_cuda_memory_copy_register (plugin, GST_RANK_NONE);
+  gst_element_register (plugin, "cudakernel", GST_RANK_NONE,
+      GST_TYPE_CUDA_KERNEL);
 
   if (have_nvrtc) {
     gst_element_register (plugin, "cudaconvert", GST_RANK_NONE,

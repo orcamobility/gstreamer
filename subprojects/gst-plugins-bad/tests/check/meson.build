@@ -41,6 +41,7 @@ base_tests = [
   [['elements/ccextractor.c'], get_option('closedcaption').disabled()],
   [['elements/cudaconvert.c'], false, [gstgl_dep, gmodule_dep]],
   [['elements/cudafilter.c'], false, [gstgl_dep, gmodule_dep]],
+  [['elements/cudakernel.c'], not gstcuda_dep.found(), [gstvideo_dep, gstcuda_dep]],
   [['elements/dashsink.c']],
   [['elements/d3d11colorconvert.c'], host_machine.system() != 'windows', ],
   [['elements/d3d11videosink.c'], host_machine.system() != 'windows', ],
