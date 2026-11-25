@@ -1298,7 +1298,7 @@ GST_START_TEST (test_parse_forbidden_nal_progress)
 
 GST_END_TEST;
 
-GST_START_TEST (test_parse_reject_invalid_parameter_set)
+GST_START_TEST (test_parse_reject_profile_zero_sps)
 {
   /* The clear-forbidden-bit variant of the captured ACTi trailer. */
   guint8 bogus_sps[] = {
@@ -1306,43 +1306,17 @@ GST_START_TEST (test_parse_reject_invalid_parameter_set)
     0x01, 0x00, 0x03, 0xb3, 0x05, 0x00, 0x00, 0x46,
     0x04, 0x00, 0x05, 0xbf, 0x95, 0x06, 0x6b, 0xab, 0x7c, 0x08
   };
-  guint8 bad_sps[sizeof (h264_sps)];
-  guint8 bad_pps[sizeof (h264_pps)];
-  const guint8 bad_ext[] = { 0, 0, 0, 1, 0x0d, 0x80 };
-  const guint8 *bad = bogus_sps;
-  gsize bad_size = sizeof (bogus_sps);
+  const guint8 headers[] = { 0x07, 0x27, 0x47, 0x67,
+    0x0f, 0x2f, 0x4f, 0x6f
+  };
   GstHarness *h = gst_harness_new ("h264parse");
   GstBuffer *buf;
   GstCaps *before, *after;
   guint pictures = 0;
 
-  memcpy (bad_sps, h264_sps, sizeof (bad_sps));
-  bad_sps[4] = 7;
-  memcpy (bad_pps, h264_pps, sizeof (bad_pps));
-  bad_pps[4] = 8;
-  switch (__i__) {
-    case 0:
-      bad = bad_sps;
-      bad_size = sizeof (bad_sps);
-      break;
-    case 1:
-      bad = bad_pps;
-      bad_size = sizeof (bad_pps);
-      break;
-    case 3:
-      bogus_sps[4] = 0x67;
-      break;
-    case 4:
-      bogus_sps[4] = 0x6f;
-      break;
-    case 5:
-      bad = bad_ext;
-      bad_size = sizeof (bad_ext);
-      break;
-    default:
-      break;
-  }
+  guint buffers = 0;
 
+  bogus_sps[4] = headers[__i__ % G_N_ELEMENTS (headers)];
   gst_harness_set_caps_str (h,
       "video/x-h264,stream-format=byte-stream,alignment=au",
       "video/x-h264,stream-format=byte-stream,alignment=au");
@@ -1354,8 +1328,13 @@ GST_START_TEST (test_parse_reject_invalid_parameter_set)
 
   /* Rejection must preserve the cached parameter sets and the valid slice
    * following the bad NAL in the same input buffer. */
-  buf = composite_buffer (GST_SECOND, 0, 2, bad, bad_size,
-      h264_idrframe, sizeof (h264_idrframe));
+  if (__i__ < G_N_ELEMENTS (headers))
+    buf = composite_buffer (GST_SECOND, 0, 2, bogus_sps, sizeof (bogus_sps),
+        h264_idrframe, sizeof (h264_idrframe));
+  else
+    buf = composite_buffer (GST_SECOND, 0, 4, h264_sps, sizeof (h264_sps),
+        h264_pps, sizeof (h264_pps), bogus_sps, sizeof (bogus_sps),
+        h264_idrframe, sizeof (h264_idrframe));
   fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
   fail_unless (gst_harness_push_event (h, gst_event_new_eos ()));
   after = gst_pad_get_current_caps (h->sinkpad);
@@ -1370,9 +1349,81 @@ GST_START_TEST (test_parse_reject_invalid_parameter_set)
         gst_buffer_memcmp (buf, size - sizeof (h264_idrframe),
             h264_idrframe, sizeof (h264_idrframe)) == 0)
       pictures++;
+    buffers++;
     gst_buffer_unref (buf);
   }
   fail_unless_equals_int (pictures, 2);
+  fail_unless_equals_int (buffers, 2);
+  gst_harness_teardown (h);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_parse_zero_nri_avc_compatibility)
+{
+  guint8 codec_data[sizeof (h264_avc_codec_data)];
+  guint8 packet[sizeof (h264_sps) + sizeof (h264_pps) + sizeof (h264_idrframe)];
+  GstHarness *h = gst_harness_new ("h264parse");
+  GstBuffer *buf, *cdata;
+  GstCaps *caps;
+  gsize offset = 0;
+  guint pictures = 0;
+
+  memcpy (codec_data, h264_avc_codec_data, sizeof (codec_data));
+  if (!(__i__ & 1)) {
+    guint pps_offset = 8 + GST_READ_UINT16_BE (codec_data + 6) + 3;
+
+    /* Preserve avcC compatibility for previously accepted SPS/PPS headers. */
+    codec_data[8] &= 0x9f;
+    codec_data[pps_offset] &= 0x9f;
+  } else {
+    /* With ordinary avcC headers, exercise zero-NRI in-band parameter sets
+     * followed by an IDR in the same packet. */
+    GST_WRITE_UINT32_BE (packet, sizeof (h264_sps) - 4);
+    memcpy (packet + 4, h264_sps + 4, sizeof (h264_sps) - 4);
+    packet[4] &= 0x9f;
+    offset += sizeof (h264_sps);
+    GST_WRITE_UINT32_BE (packet + offset, sizeof (h264_pps) - 4);
+    memcpy (packet + offset + 4, h264_pps + 4, sizeof (h264_pps) - 4);
+    packet[offset + 4] &= 0x9f;
+    offset += sizeof (h264_pps);
+  }
+  GST_WRITE_UINT32_BE (packet + offset, sizeof (h264_idrframe) - 4);
+  memcpy (packet + offset + 4, h264_idrframe + 4, sizeof (h264_idrframe) - 4);
+  offset += sizeof (h264_idrframe);
+
+  cdata = gst_buffer_new_memdup (codec_data, sizeof (codec_data));
+  caps = gst_caps_new_simple ("video/x-h264",
+      "stream-format", G_TYPE_STRING, "avc",
+      "alignment", G_TYPE_STRING, "au",
+      "parsed", G_TYPE_BOOLEAN, FALSE,
+      "codec_data", GST_TYPE_BUFFER, cdata, NULL);
+  gst_buffer_unref (cdata);
+  gst_harness_set_sink_caps_str (h, (__i__ & 2) ?
+      "video/x-h264,stream-format=byte-stream,alignment=nal" :
+      "video/x-h264,stream-format=avc,alignment=au");
+  gst_harness_set_src_caps (h, caps);
+  buf = gst_buffer_new_memdup (packet, offset);
+  GST_BUFFER_PTS (buf) = 0;
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+  fail_unless (gst_harness_push_event (h, gst_event_new_eos ()));
+
+  caps = gst_pad_get_current_caps (h->sinkpad);
+  fail_unless (caps != NULL);
+  gst_caps_unref (caps);
+  while ((buf = gst_harness_try_pull (h))) {
+    gsize size = gst_buffer_get_size (buf);
+    gsize payload_size = sizeof (h264_idrframe) - 4;
+
+    if (size >= payload_size &&
+        gst_buffer_memcmp (buf, size - payload_size,
+            h264_idrframe + 4, payload_size) == 0) {
+      pictures++;
+      fail_if (GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_DELTA_UNIT));
+    }
+    gst_buffer_unref (buf);
+  }
+  fail_unless_equals_int (pictures, 1);
   gst_harness_teardown (h);
 }
 
@@ -1906,7 +1957,8 @@ main (int argc, char **argv)
     s = suite_create ("h264parse");
     suite_add_tcase (s, tc_chain);
     tcase_add_loop_test (tc_chain, test_parse_forbidden_nal_progress, 0, 4);
-    tcase_add_loop_test (tc_chain, test_parse_reject_invalid_parameter_set, 0, 6);
+    tcase_add_loop_test (tc_chain, test_parse_reject_profile_zero_sps, 0, 16);
+    tcase_add_loop_test (tc_chain, test_parse_zero_nri_avc_compatibility, 0, 4);
     tcase_add_test (tc_chain, test_parse_valid_parameter_set_replacement);
     tcase_add_test (tc_chain, test_parse_sei_closedcaptions);
     tcase_add_test (tc_chain, test_parse_compatible_caps);

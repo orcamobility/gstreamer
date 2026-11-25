@@ -1141,7 +1141,7 @@ GST_START_TEST (test_h264_forbidden_trailer)
 
 GST_END_TEST;
 
-GST_START_TEST (test_h264_parameter_set_headers)
+GST_START_TEST (test_h264_parameter_set_nri_compatibility)
 {
   const guint types[] = { 7, 8, 13, 15 };
   const guint non_reference_types[] = { 1, 6, 9, 12 };
@@ -1154,21 +1154,19 @@ GST_START_TEST (test_h264_parameter_set_headers)
     for (nri = 0; nri < 4; nri++) {
       guint8 annexb[] = { 0, 0, 1, 0, 0x80, 0, 0, 1, 9, 0xf0 };
       guint8 avc[] = { 0, 0, 0, 7, 0, 0x80, 0, 0, 1, 9, 0xf0 };
-      GstH264ParserResult expected = nri ? GST_H264_PARSER_OK :
-          GST_H264_PARSER_BROKEN_DATA;
       gsize consumed;
 
       annexb[3] = avc[4] = types[i] | (nri << 5);
       fail_unless_equals_int (gst_h264_parser_identify_nalu (parser,
-              annexb, 0, sizeof (annexb), &nalu), expected);
+              annexb, 0, sizeof (annexb), &nalu), GST_H264_PARSER_OK);
       fail_unless_equals_int (gst_h264_parser_identify_nalu_avc (parser,
-              avc, 0, sizeof (avc), 4, &nalu), expected);
+              avc, 0, sizeof (avc), 4, &nalu), GST_H264_PARSER_OK);
 
-      /* A rejected header must not hide the valid NAL after it. */
+      /* Preserve existing NRI-zero tolerance, including packetized input. */
       fail_unless_equals_int (gst_h264_parser_identify_and_split_nalu_avc
           (parser, avc, 0, sizeof (avc), 4, nalus, &consumed),
           GST_H264_PARSER_OK);
-      fail_unless_equals_int (nalus->len, nri ? 2 : 1);
+      fail_unless_equals_int (nalus->len, 2);
       fail_unless_equals_int (g_array_index (nalus, GstH264NalUnit,
               nalus->len - 1).type, GST_H264_NAL_AU_DELIMITER);
     }
@@ -1220,20 +1218,19 @@ GST_START_TEST (test_h264_parameter_set_validation_preserves_state)
 
   nalu.header_bytes = 1;
   for (nri = 0; nri < 4; nri++) {
-    GstH264ParserResult expected = nri ? GST_H264_PARSER_OK :
-        GST_H264_PARSER_BROKEN_DATA;
-
-    /* Exercise direct entry points, without going through identification. */
+    /* Keep the existing NRI-zero tolerance for otherwise usable parameter
+     * sets. Exercise direct APIs without going through identification. */
     sps_data[0] = 7 | (nri << 5);
     nalu.data = sps_data;
     nalu.size = sizeof (sps_data);
-    fail_unless_equals_int (gst_h264_parse_sps (&nalu, &sps), expected);
+    fail_unless_equals_int (gst_h264_parse_sps (&nalu, &sps),
+        GST_H264_PARSER_OK);
     gst_h264_sps_clear (&sps);
     fail_unless_equals_int (gst_h264_parser_parse_sps (parser, &nalu, &sps),
-        expected);
+        GST_H264_PARSER_OK);
     gst_h264_sps_clear (&sps);
 
-    /* Seed a valid SPS even when testing a rejected PPS/subset SPS. */
+    /* Restore the camera's original SPS before parsing its PPS. */
     sps_data[0] = 0x67;
     fail_unless_equals_int (gst_h264_parser_parse_sps (parser, &nalu, &sps),
         GST_H264_PARSER_OK);
@@ -1242,19 +1239,21 @@ GST_START_TEST (test_h264_parameter_set_validation_preserves_state)
     pps_data[0] = 8 | (nri << 5);
     nalu.data = pps_data;
     nalu.size = sizeof (pps_data);
-    fail_unless_equals_int (gst_h264_parse_pps (parser, &nalu, &pps), expected);
+    fail_unless_equals_int (gst_h264_parse_pps (parser, &nalu, &pps),
+        GST_H264_PARSER_OK);
     gst_h264_pps_clear (&pps);
     fail_unless_equals_int (gst_h264_parser_parse_pps (parser, &nalu, &pps),
-        expected);
+        GST_H264_PARSER_OK);
     gst_h264_pps_clear (&pps);
 
     mvc_data[0] = 15 | (nri << 5);
     nalu.data = mvc_data;
     nalu.size = sizeof (mvc_data);
-    fail_unless_equals_int (gst_h264_parse_subset_sps (&nalu, &sps), expected);
+    fail_unless_equals_int (gst_h264_parse_subset_sps (&nalu, &sps),
+        GST_H264_PARSER_OK);
     gst_h264_sps_clear (&sps);
     fail_unless_equals_int (gst_h264_parser_parse_subset_sps (parser, &nalu,
-            &sps), expected);
+            &sps), GST_H264_PARSER_OK);
     gst_h264_sps_clear (&sps);
   }
 
@@ -1264,9 +1263,9 @@ GST_START_TEST (test_h264_parameter_set_validation_preserves_state)
       GST_H264_PARSER_OK);
   gst_h264_sps_clear (&sps);
 
-  /* Even nonzero NRI cannot make profile_idc zero a valid SPS. Test both
+  /* No NRI value can make profile_idc zero a valid SPS. Test both
    * ordinary and subset SPS entry points, with the same ID as the good SPS. */
-  for (nri = 1; nri < 4; nri++) {
+  for (nri = 0; nri < 4; nri++) {
     nalu.data = bogus_sps;
     nalu.size = sizeof (bogus_sps);
     bogus_sps[0] = 7 | (nri << 5);
@@ -1308,7 +1307,7 @@ h264parser_suite (void)
   tcase_add_test (tc_chain, test_h264_parse_partial_nal_header);
   tcase_add_test (tc_chain, test_h264_split_avc);
   tcase_add_test (tc_chain, test_h264_forbidden_trailer);
-  tcase_add_test (tc_chain, test_h264_parameter_set_headers);
+  tcase_add_test (tc_chain, test_h264_parameter_set_nri_compatibility);
   tcase_add_test (tc_chain, test_h264_parameter_set_validation_preserves_state);
 
   return s;
