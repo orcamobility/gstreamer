@@ -984,18 +984,17 @@ gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
       goto process_sps;
 
     case GST_H264_NAL_SPS:
-      /* reset state, everything else is obsolete */
-      h264parse->state &= GST_H264_PARSE_STATE_GOT_PPS;
       pres = gst_h264_parser_parse_sps (nalparser, nalu, &sps);
 
     process_sps:
-      /* arranged for a fallback sps.id, so use that one and only warn */
       if (pres != GST_H264_PARSER_OK) {
         GST_WARNING_OBJECT (h264parse, "failed to parse SPS:");
-        h264parse->state |= GST_H264_PARSE_STATE_GOT_SPS;
-        h264parse->header = TRUE;
         return FALSE;
       }
+
+      /* Only a valid replacement may invalidate the previous frame state. */
+      if (nal_type == GST_H264_NAL_SPS)
+        h264parse->state &= GST_H264_PARSE_STATE_GOT_PPS;
 
       GST_DEBUG_OBJECT (h264parse, "triggering src caps check");
       h264parse->update_caps = TRUE;

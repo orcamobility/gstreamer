@@ -198,6 +198,33 @@ gst_h264_parser_get_pps (GstH264NalParser * nalparser, guint8 pps_id)
 }
 
 static gboolean
+gst_h264_check_nalu_header (guint8 header)
+{
+  if (header & 0x80) {
+    GST_WARNING ("NAL has forbidden_zero_bit set");
+    return FALSE;
+  }
+
+  /* H.264 7.4.1 requires nonzero nal_ref_idc for all parameter sets.
+   * Non-reference slices and other non-VCL NALs may still use zero. */
+  switch (header & 0x1f) {
+    case GST_H264_NAL_SPS:
+    case GST_H264_NAL_PPS:
+    case GST_H264_NAL_SPS_EXT:
+    case GST_H264_NAL_SUBSET_SPS:
+      if (!(header & 0x60)) {
+        GST_WARNING ("Parameter set has nal_ref_idc zero");
+        return FALSE;
+      }
+      break;
+    default:
+      break;
+  }
+
+  return TRUE;
+}
+
+static gboolean
 gst_h264_parse_nalu_header (GstH264NalUnit * nalu)
 {
   guint8 *data = nalu->data + nalu->offset;
@@ -207,7 +234,7 @@ gst_h264_parse_nalu_header (GstH264NalUnit * nalu)
   if (nalu->size < 1)
     return FALSE;
 
-  if (data[0] & 0x80)
+  if (!gst_h264_check_nalu_header (data[0]))
     return FALSE;
 
   nalu->type = (data[0] & 0x1f);
@@ -1514,8 +1541,7 @@ gst_h264_parser_identify_nalu_unchecked (GstH264NalParser * nalparser,
   nalu->size = size - nalu->offset;
 
   /* An invalid header cannot become valid by appending more data. */
-  if (data[nalu->offset] & 0x80) {
-    GST_WARNING ("NAL has forbidden_zero_bit set");
+  if (!gst_h264_check_nalu_header (data[nalu->offset])) {
     nalu->size = 0;
     return GST_H264_PARSER_BROKEN_DATA;
   }
@@ -1910,6 +1936,13 @@ gst_h264_parse_sps_data (NalReader * nr, GstH264SPS * sps)
   memset (sps->scaling_lists_8x8, 16, 384);
 
   READ_UINT8 (nr, sps->profile_idc, 8);
+  /* Profile zero is reserved, not an implicit Baseline profile. Camera
+   * metadata recovered at a false start code can otherwise overwrite a
+   * valid SPS. Leave other profile handling unchanged. */
+  if (sps->profile_idc == 0) {
+    GST_WARNING ("Invalid SPS profile_idc zero");
+    goto error;
+  }
   READ_UINT8 (nr, sps->constraint_set0_flag, 1);
   READ_UINT8 (nr, sps->constraint_set1_flag, 1);
   READ_UINT8 (nr, sps->constraint_set2_flag, 1);
@@ -2153,6 +2186,12 @@ gst_h264_parse_sps (GstH264NalUnit * nalu, GstH264SPS * sps)
 {
   NalReader nr;
 
+  if (nalu->size < 1 || nalu->size < nalu->header_bytes ||
+      !gst_h264_check_nalu_header (nalu->data[nalu->offset])) {
+    memset (sps, 0, sizeof (*sps));
+    return GST_H264_PARSER_BROKEN_DATA;
+  }
+
   GST_DEBUG ("parsing SPS");
 
   nal_reader_init (&nr, nalu->data + nalu->offset + nalu->header_bytes,
@@ -2236,7 +2275,8 @@ gst_h264_parse_subset_sps (GstH264NalUnit * nalu, GstH264SPS * sps)
 {
   NalReader nr;
 
-  if (nalu->size < 1 || (nalu->data[nalu->offset] & 0x80)) {
+  if (nalu->size < 1 || nalu->size < nalu->header_bytes ||
+      !gst_h264_check_nalu_header (nalu->data[nalu->offset])) {
     memset (sps, 0, sizeof (*sps));
     return GST_H264_PARSER_BROKEN_DATA;
   }
@@ -2288,12 +2328,15 @@ gst_h264_parse_pps (GstH264NalParser * nalparser, GstH264NalUnit * nalu,
   gint sps_id;
   gint qp_bd_offset;
 
+  memset (pps, 0, sizeof (*pps));
+  if (nalu->size < 1 || nalu->size < nalu->header_bytes ||
+      !gst_h264_check_nalu_header (nalu->data[nalu->offset]))
+    return GST_H264_PARSER_BROKEN_DATA;
+
   GST_DEBUG ("parsing PPS");
 
   nal_reader_init (&nr, nalu->data + nalu->offset + nalu->header_bytes,
       nalu->size - nalu->header_bytes);
-
-  memset (pps, 0, sizeof (*pps));
 
   READ_UE_MAX (&nr, pps->id, GST_H264_MAX_PPS_COUNT - 1);
   READ_UE_MAX (&nr, sps_id, GST_H264_MAX_SPS_COUNT - 1);

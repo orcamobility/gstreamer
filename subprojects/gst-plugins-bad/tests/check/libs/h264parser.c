@@ -1141,6 +1141,155 @@ GST_START_TEST (test_h264_forbidden_trailer)
 
 GST_END_TEST;
 
+GST_START_TEST (test_h264_parameter_set_headers)
+{
+  const guint types[] = { 7, 8, 13, 15 };
+  const guint non_reference_types[] = { 1, 6, 9, 12 };
+  GstH264NalParser *parser = gst_h264_nal_parser_new ();
+  GArray *nalus = g_array_new (FALSE, FALSE, sizeof (GstH264NalUnit));
+  GstH264NalUnit nalu;
+  guint i, nri;
+
+  for (i = 0; i < G_N_ELEMENTS (types); i++) {
+    for (nri = 0; nri < 4; nri++) {
+      guint8 annexb[] = { 0, 0, 1, 0, 0x80, 0, 0, 1, 9, 0xf0 };
+      guint8 avc[] = { 0, 0, 0, 7, 0, 0x80, 0, 0, 1, 9, 0xf0 };
+      GstH264ParserResult expected = nri ? GST_H264_PARSER_OK :
+          GST_H264_PARSER_BROKEN_DATA;
+      gsize consumed;
+
+      annexb[3] = avc[4] = types[i] | (nri << 5);
+      fail_unless_equals_int (gst_h264_parser_identify_nalu (parser,
+              annexb, 0, sizeof (annexb), &nalu), expected);
+      fail_unless_equals_int (gst_h264_parser_identify_nalu_avc (parser,
+              avc, 0, sizeof (avc), 4, &nalu), expected);
+
+      /* A rejected header must not hide the valid NAL after it. */
+      fail_unless_equals_int (gst_h264_parser_identify_and_split_nalu_avc
+          (parser, avc, 0, sizeof (avc), 4, nalus, &consumed),
+          GST_H264_PARSER_OK);
+      fail_unless_equals_int (nalus->len, nri ? 2 : 1);
+      fail_unless_equals_int (g_array_index (nalus, GstH264NalUnit,
+              nalus->len - 1).type, GST_H264_NAL_AU_DELIMITER);
+    }
+  }
+
+  /* NRI zero is valid for non-reference slices and several non-VCL types. */
+  for (i = 0; i < G_N_ELEMENTS (non_reference_types); i++) {
+    guint8 annexb[] = { 0, 0, 1, 0, 0x80, 0, 0, 1, 9, 0xf0 };
+
+    annexb[3] = non_reference_types[i];
+    fail_unless_equals_int (gst_h264_parser_identify_nalu (parser,
+            annexb, 0, sizeof (annexb), &nalu), GST_H264_PARSER_OK);
+  }
+
+  g_array_unref (nalus);
+  gst_h264_nal_parser_free (parser);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_h264_parameter_set_validation_preserves_state)
+{
+  /* The genuine High-profile SPS/PPS from the Scallops camera. */
+  guint8 sps_data[] = {
+    0x67, 0x64, 0x00, 0x14, 0xad, 0x84, 0x01, 0x0c,
+    0x20, 0x08, 0x61, 0x00, 0x43, 0x08, 0x02, 0x18,
+    0x40, 0x10, 0xc2, 0x00, 0x84, 0x2c, 0x4a, 0x85,
+    0x07, 0xe9, 0xb8, 0x08, 0x08, 0x08, 0x10
+  };
+  guint8 pps_data[] = { 0x68, 0xee, 0x3c, 0xb0 };
+  /* A two-view, 32x32 Multiview High subset SPS, including trailing bits. */
+  guint8 mvc_data[] = {
+    0x6f, 0x76, 0x00, 0x1e, 0xac, 0xe8,
+    0x96, 0x55, 0x2d, 0x71, 0xe8, 0x54, 0x88
+  };
+  /* Derived from the captured trailer by changing two bytes in its size
+   * field. This is not an unmodified incident-time NAL. */
+  guint8 bogus_sps[] = {
+    0x0f, 0x00, 0x00, 0xbf, 0x95, 0x06, 0x6b, 0x0c,
+    0x01, 0x00, 0x03, 0xb3, 0x05, 0x00, 0x00, 0x46,
+    0x04, 0x00, 0x05, 0xbf, 0x95, 0x06, 0x6b, 0xab,
+    0x7c, 0x08
+  };
+  GstH264NalParser *parser = gst_h264_nal_parser_new ();
+  GstH264NalUnit nalu = { 0, };
+  GstH264SPS sps = { 0, };
+  GstH264PPS pps = { 0, };
+  guint nri;
+
+  nalu.header_bytes = 1;
+  for (nri = 0; nri < 4; nri++) {
+    GstH264ParserResult expected = nri ? GST_H264_PARSER_OK :
+        GST_H264_PARSER_BROKEN_DATA;
+
+    /* Exercise direct entry points, without going through identification. */
+    sps_data[0] = 7 | (nri << 5);
+    nalu.data = sps_data;
+    nalu.size = sizeof (sps_data);
+    fail_unless_equals_int (gst_h264_parse_sps (&nalu, &sps), expected);
+    gst_h264_sps_clear (&sps);
+    fail_unless_equals_int (gst_h264_parser_parse_sps (parser, &nalu, &sps),
+        expected);
+    gst_h264_sps_clear (&sps);
+
+    /* Seed a valid SPS even when testing a rejected PPS/subset SPS. */
+    sps_data[0] = 0x67;
+    fail_unless_equals_int (gst_h264_parser_parse_sps (parser, &nalu, &sps),
+        GST_H264_PARSER_OK);
+    gst_h264_sps_clear (&sps);
+
+    pps_data[0] = 8 | (nri << 5);
+    nalu.data = pps_data;
+    nalu.size = sizeof (pps_data);
+    fail_unless_equals_int (gst_h264_parse_pps (parser, &nalu, &pps), expected);
+    gst_h264_pps_clear (&pps);
+    fail_unless_equals_int (gst_h264_parser_parse_pps (parser, &nalu, &pps),
+        expected);
+    gst_h264_pps_clear (&pps);
+
+    mvc_data[0] = 15 | (nri << 5);
+    nalu.data = mvc_data;
+    nalu.size = sizeof (mvc_data);
+    fail_unless_equals_int (gst_h264_parse_subset_sps (&nalu, &sps), expected);
+    gst_h264_sps_clear (&sps);
+    fail_unless_equals_int (gst_h264_parser_parse_subset_sps (parser, &nalu,
+            &sps), expected);
+    gst_h264_sps_clear (&sps);
+  }
+
+  nalu.data = sps_data;
+  nalu.size = sizeof (sps_data);
+  fail_unless_equals_int (gst_h264_parser_parse_sps (parser, &nalu, &sps),
+      GST_H264_PARSER_OK);
+  gst_h264_sps_clear (&sps);
+
+  /* Even nonzero NRI cannot make profile_idc zero a valid SPS. Test both
+   * ordinary and subset SPS entry points, with the same ID as the good SPS. */
+  for (nri = 1; nri < 4; nri++) {
+    nalu.data = bogus_sps;
+    nalu.size = sizeof (bogus_sps);
+    bogus_sps[0] = 7 | (nri << 5);
+    fail_unless_equals_int (gst_h264_parser_parse_sps (parser, &nalu, &sps),
+        GST_H264_PARSER_ERROR);
+    fail_if (sps.valid);
+    gst_h264_sps_clear (&sps);
+    bogus_sps[0] = 15 | (nri << 5);
+    fail_unless_equals_int (gst_h264_parser_parse_subset_sps (parser, &nalu,
+            &sps), GST_H264_PARSER_ERROR);
+    fail_if (sps.valid);
+    gst_h264_sps_clear (&sps);
+    fail_unless (parser->last_sps == &parser->sps[0]);
+    fail_unless_equals_int (parser->last_sps->profile_idc, 100);
+    fail_unless_equals_int (parser->last_sps->width, 320);
+    fail_unless_equals_int (parser->last_sps->height, 240);
+  }
+
+  gst_h264_nal_parser_free (parser);
+}
+
+GST_END_TEST;
+
 static Suite *
 h264parser_suite (void)
 {
@@ -1159,6 +1308,8 @@ h264parser_suite (void)
   tcase_add_test (tc_chain, test_h264_parse_partial_nal_header);
   tcase_add_test (tc_chain, test_h264_split_avc);
   tcase_add_test (tc_chain, test_h264_forbidden_trailer);
+  tcase_add_test (tc_chain, test_h264_parameter_set_headers);
+  tcase_add_test (tc_chain, test_h264_parameter_set_validation_preserves_state);
 
   return s;
 }

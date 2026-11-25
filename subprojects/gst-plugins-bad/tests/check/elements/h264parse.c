@@ -1298,6 +1298,122 @@ GST_START_TEST (test_parse_forbidden_nal_progress)
 
 GST_END_TEST;
 
+GST_START_TEST (test_parse_reject_invalid_parameter_set)
+{
+  /* The clear-forbidden-bit variant of the captured ACTi trailer. */
+  guint8 bogus_sps[] = {
+    0, 0, 0, 1, 0x0f, 0x00, 0x00, 0xbf, 0x95, 0x06, 0x6b, 0x0c,
+    0x01, 0x00, 0x03, 0xb3, 0x05, 0x00, 0x00, 0x46,
+    0x04, 0x00, 0x05, 0xbf, 0x95, 0x06, 0x6b, 0xab, 0x7c, 0x08
+  };
+  guint8 bad_sps[sizeof (h264_sps)];
+  guint8 bad_pps[sizeof (h264_pps)];
+  const guint8 bad_ext[] = { 0, 0, 0, 1, 0x0d, 0x80 };
+  const guint8 *bad = bogus_sps;
+  gsize bad_size = sizeof (bogus_sps);
+  GstHarness *h = gst_harness_new ("h264parse");
+  GstBuffer *buf;
+  GstCaps *before, *after;
+  guint pictures = 0;
+
+  memcpy (bad_sps, h264_sps, sizeof (bad_sps));
+  bad_sps[4] = 7;
+  memcpy (bad_pps, h264_pps, sizeof (bad_pps));
+  bad_pps[4] = 8;
+  switch (__i__) {
+    case 0:
+      bad = bad_sps;
+      bad_size = sizeof (bad_sps);
+      break;
+    case 1:
+      bad = bad_pps;
+      bad_size = sizeof (bad_pps);
+      break;
+    case 3:
+      bogus_sps[4] = 0x67;
+      break;
+    case 4:
+      bogus_sps[4] = 0x6f;
+      break;
+    case 5:
+      bad = bad_ext;
+      bad_size = sizeof (bad_ext);
+      break;
+    default:
+      break;
+  }
+
+  gst_harness_set_caps_str (h,
+      "video/x-h264,stream-format=byte-stream,alignment=au",
+      "video/x-h264,stream-format=byte-stream,alignment=au");
+  buf = composite_buffer (0, 0, 3, h264_sps, sizeof (h264_sps),
+      h264_pps, sizeof (h264_pps), h264_idrframe, sizeof (h264_idrframe));
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+  before = gst_pad_get_current_caps (h->sinkpad);
+  fail_unless (before != NULL);
+
+  /* Rejection must preserve the cached parameter sets and the valid slice
+   * following the bad NAL in the same input buffer. */
+  buf = composite_buffer (GST_SECOND, 0, 2, bad, bad_size,
+      h264_idrframe, sizeof (h264_idrframe));
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+  fail_unless (gst_harness_push_event (h, gst_event_new_eos ()));
+  after = gst_pad_get_current_caps (h->sinkpad);
+  fail_unless (gst_caps_is_equal (before, after));
+  gst_caps_unref (before);
+  gst_caps_unref (after);
+
+  while ((buf = gst_harness_try_pull (h))) {
+    gsize size = gst_buffer_get_size (buf);
+
+    if (size >= sizeof (h264_idrframe) &&
+        gst_buffer_memcmp (buf, size - sizeof (h264_idrframe),
+            h264_idrframe, sizeof (h264_idrframe)) == 0)
+      pictures++;
+    gst_buffer_unref (buf);
+  }
+  fail_unless_equals_int (pictures, 2);
+  gst_harness_teardown (h);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_parse_valid_parameter_set_replacement)
+{
+  GstHarness *h = gst_harness_new ("h264parse");
+  GstBuffer *buf;
+  GstCaps *before, *after;
+
+  gst_harness_set_caps_str (h,
+      "video/x-h264,stream-format=byte-stream,alignment=au",
+      "video/x-h264,stream-format=byte-stream,alignment=au");
+  buf = composite_buffer (0, 0, 3, h264_sps, sizeof (h264_sps),
+      h264_pps, sizeof (h264_pps), h264_idrframe, sizeof (h264_idrframe));
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+  before = gst_pad_get_current_caps (h->sinkpad);
+  fail_unless (before != NULL);
+
+  /* A genuine new SPS/PPS with the same IDs must still change resolution. */
+  buf = composite_buffer (GST_SECOND, 0, 3,
+      h264_slicing_sps, sizeof (h264_slicing_sps),
+      h264_slicing_pps, sizeof (h264_slicing_pps),
+      h264_idr_slice_1, sizeof (h264_idr_slice_1));
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+  fail_unless (gst_harness_push_event (h, gst_event_new_eos ()));
+  after = gst_pad_get_current_caps (h->sinkpad);
+  fail_unless (after != NULL);
+  fail_if (gst_caps_is_equal (before, after));
+  fail_unless_structure_field_int_equals (gst_caps_get_structure (after, 0),
+      "width", 128);
+  fail_unless_structure_field_int_equals (gst_caps_get_structure (after, 0),
+      "height", 128);
+  gst_caps_unref (before);
+  gst_caps_unref (after);
+  gst_harness_teardown (h);
+}
+
+GST_END_TEST;
+
 GST_START_TEST (test_parse_sei_closedcaptions)
 {
   GstVideoCaptionMeta *cc;
@@ -1790,6 +1906,8 @@ main (int argc, char **argv)
     s = suite_create ("h264parse");
     suite_add_tcase (s, tc_chain);
     tcase_add_loop_test (tc_chain, test_parse_forbidden_nal_progress, 0, 4);
+    tcase_add_loop_test (tc_chain, test_parse_reject_invalid_parameter_set, 0, 6);
+    tcase_add_test (tc_chain, test_parse_valid_parameter_set_replacement);
     tcase_add_test (tc_chain, test_parse_sei_closedcaptions);
     tcase_add_test (tc_chain, test_parse_compatible_caps);
     tcase_add_test (tc_chain, test_parse_skip_to_4bytes_sc);
