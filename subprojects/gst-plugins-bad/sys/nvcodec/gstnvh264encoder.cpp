@@ -1682,6 +1682,7 @@ gst_nv_h264_encoder_set_format (GstNvEncoder * encoder,
       gst_video_color_primaries_to_iso (cinfo.primaries);
   vui->transferCharacteristics = (NV_ENC_VUI_TRANSFER_CHARACTERISTIC)
       gst_video_transfer_function_to_iso (cinfo.transfer);
+  vui->bitstreamRestrictionFlag = 1;
 
   g_mutex_unlock (&self->prop_lock);
 
