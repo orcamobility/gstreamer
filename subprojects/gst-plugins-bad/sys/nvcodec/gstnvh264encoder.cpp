@@ -1482,9 +1482,6 @@ gst_nv_h264_encoder_set_format (GstNvEncoder * encoder,
   vui->transferCharacteristics =
       gst_video_transfer_function_to_iso (info->colorimetry.transfer);
 
-  /* Without bitstream_restriction, decoders infer max_num_reorder_frames
-   * as the level's full DPB size (H.264 E.2.1) and delay output by that
-   * many frames even when the stream has no B-frames */
   vui->bitstreamRestrictionFlag = 1;
 
   g_mutex_unlock (&self->prop_lock);
