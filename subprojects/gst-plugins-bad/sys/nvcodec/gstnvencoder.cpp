@@ -891,6 +891,7 @@ gst_nv_encoder_thread_func (GstNvEncoder * self)
     if (priv->last_flow != GST_FLOW_OK) {
       gst_nv_enc_task_unlock_bitstream (task);
       gst_nv_enc_task_unref (task);
+      gst_video_encoder_finish_frame (encoder, frame);
       continue;
     }
 
@@ -1948,6 +1949,8 @@ gst_nv_encoder_handle_frame (GstVideoEncoder * encoder,
     GST_INFO_OBJECT (self, "Last flow was %s",
         gst_flow_get_name (priv->last_flow));
     gst_video_encoder_finish_frame (encoder, frame);
+    if (task)
+      gst_nv_enc_task_unref (task);
 
     return priv->last_flow;
   }
