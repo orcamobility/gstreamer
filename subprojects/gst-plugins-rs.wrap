@@ -3,3 +3,4 @@ directory=gst-plugins-rs
 url=https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git
 push-url=git@gitlab.freedesktop.org:gstreamer/gst-plugins-rs.git
 revision=a1f848957b0c0747f0008b19cc30eb55ba08a338
+diff_files = gst-plugins-rs/0001-isobmff-fmp4mux-advance-chunk-start-after-empty-drain.patch

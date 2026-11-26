@@ -1,0 +1,516 @@
+From b1f3080e920dd162c35cd4598da1979c9476856e Mon Sep 17 00:00:00 2001
+From: Nirbheek Chauhan <nirbheek.chauhan@coram.ai>
+Date: Thu, 26 Nov 2026 16:45:27 +0530
+Subject: [PATCH] isobmff/fmp4mux: advance chunk start PTS after empty drain
+
+When chunk-duration is configured and all remaining queued GOPs start at
+or after the current chunk end (for example after a caps change or a
+timestamp gap exceeding chunk-duration or fragment-duration),
+drain_one_chunk() drains no buffers and returns Ok((caps, None)) without
+advancing chunk_start_pts or fragment_start_pts.
+
+Subsequent aggregate() calls and even EOS then keep checking the same
+stale [chunk_start_pts, chunk_start_pts + chunk_duration] window,
+stalling chunking or permanently dropping all queued GOPs past the gap.
+
+Advance chunk_start_pts (and fragment_start_pts/fragment_end_pts when
+starting a new fragment or crossing fragment_end_pts) to chunk_end_pts
+or the earliest remaining queued GOP start_pts, and let drain() re-check
+stream fill state and continue draining immediately.
+---
+ mux/isobmff/src/isobmff/fmp4mux/imp.rs |  64 +++-
+ mux/isobmff/tests/fmp4_tests.rs        | 391 +++++++++++++++++++++++++
+ 2 files changed, 452 insertions(+), 3 deletions(-)
+
+diff --git a/mux/isobmff/src/isobmff/fmp4mux/imp.rs b/mux/isobmff/src/isobmff/fmp4mux/imp.rs
+index fde17605e..b5c400cb5 100644
+--- a/mux/isobmff/src/isobmff/fmp4mux/imp.rs
++++ b/mux/isobmff/src/isobmff/fmp4mux/imp.rs
+@@ -3386,7 +3386,47 @@ impl FMP4Mux {
+         }
+ 
+         if interleaved_buffers.is_empty() {
+-            // Either at EOS or only gap buffers drained.
++            // Either at EOS, only gap buffers were drained, or all remaining
++            // queued GOPs start at or after the current chunk/fragment end.
++            // Advance chunk/fragment start PTS so draining does not stall or
++            // drop queued GOPs past the gap.
++            if !settings.manual_split {
++                let next_pts = chunk_end_pts.or_else(|| {
++                    state
++                        .streams
++                        .iter()
++                        .filter_map(|s| s.queued_gops.back().map(|gop| gop.start_pts))
++                        .min()
++                });
++
++                if let Some(next_pts) = next_pts
++                    && chunk_start_pts.is_none_or(|start| next_pts > start)
++                {
++                    if fragment_filled
++                        || state.need_new_header
++                        || fragment_start
++                        || state.fragment_end_pts.is_some_and(|end| next_pts >= end)
++                    {
++                        state.fragment_start_pts = Some(next_pts);
++                        self.calculate_fragment_end_pts(settings, state);
++                        gst::info!(
++                            CAT,
++                            imp = self,
++                            "Starting new fragment at {} after empty chunk",
++                            next_pts,
++                        );
++                    } else {
++                        gst::info!(
++                            CAT,
++                            imp = self,
++                            "Starting new chunk at {} after empty chunk",
++                            next_pts,
++                        );
++                    }
++                    state.chunk_start_pts = Some(next_pts);
++                }
++            }
++
+             return Ok((caps, None));
+         }
+ 
+@@ -3612,6 +3652,8 @@ impl FMP4Mux {
+     ) -> Result<(), gst::FlowError> {
+         // Loop as long as new chunks can be drained.
+         loop {
++            let prev_chunk_start_pts = state.chunk_start_pts;
++
+             // If enough GOPs were queued, drain and create the output fragment or chunk
+             let res = self.drain_one_chunk(state, settings, timeout, all_eos, upstream_events);
+             let mut buffer_list = match res {
+@@ -3635,9 +3677,25 @@ impl FMP4Mux {
+                 }
+             };
+ 
+-            // If nothing can't be drained anymore then break the loop, and if all streams are
+-            // EOS add the footers.
++            // If nothing can be drained anymore then break the loop, unless we advanced
++            // past an empty gap chunk and can immediately continue draining.
+             if buffer_list.is_none() {
++                if !state.need_new_header && state.chunk_start_pts != prev_chunk_start_pts {
++                    let fragment_start_pts = state.fragment_start_pts;
++                    let fragment_end_pts = state.fragment_end_pts;
++                    let chunk_start_pts = state.chunk_start_pts;
++                    for stream in &mut state.streams {
++                        self.check_stream_filled(
++                            settings,
++                            stream,
++                            fragment_start_pts,
++                            fragment_end_pts,
++                            chunk_start_pts,
++                        );
++                    }
++                    continue;
++                }
++
+                 if settings.write_mfra && all_eos {
+                     gst::debug!(CAT, imp = self, "Writing mfra box");
+                     match create_mfra(&state.streams[0].caps, &state.fragment_offsets) {
+diff --git a/mux/isobmff/tests/fmp4_tests.rs b/mux/isobmff/tests/fmp4_tests.rs
+index 64bf68db5..ad3067ac0 100644
+--- a/mux/isobmff/tests/fmp4_tests.rs
++++ b/mux/isobmff/tests/fmp4_tests.rs
+@@ -5171,3 +5171,394 @@ fn test_large_gop_split_at_fragment_boundary_chunked() {
+ 
+     assert_eq!(num_buffers, 22);
+ }
++
++fn drain_media_buffers(h: &mut gst_check::Harness) -> Vec<gst::ClockTime> {
++    let mut pts_list = Vec::new();
++    while h.buffers_in_queue() > 0 {
++        let buf = h.pull().unwrap();
++        if buf.size() == 4
++            && let Some(pts) = buf.pts()
++        {
++            pts_list.push(pts);
++        }
++    }
++    pts_list
++}
++
++#[test]
++fn test_caps_change_gap_exceeding_chunk_duration_chunked() {
++    init();
++
++    let mut h = gst_check::Harness::with_padnames("isofmp4mux", Some("sink_0"), Some("src"));
++
++    h.element()
++        .unwrap()
++        .set_property_from_str("header-update-mode", "caps");
++    h.element()
++        .unwrap()
++        .set_property("fragment-duration", 2.seconds());
++    h.element()
++        .unwrap()
++        .set_property("chunk-duration", 100.mseconds());
++
++    let low_caps = gst::Caps::builder("video/x-h264")
++        .field("width", 1280i32)
++        .field("height", 720i32)
++        .field("framerate", gst::Fraction::new(6, 1))
++        .field("stream-format", "avc")
++        .field("alignment", "au")
++        .field("codec_data", gst::Buffer::from_slice([1, 2, 3, 4]))
++        .build();
++
++    let high_caps = gst::Caps::builder("video/x-h264")
++        .field("width", 2880i32)
++        .field("height", 1620i32)
++        .field("framerate", gst::Fraction::new(20, 1))
++        .field("stream-format", "avc")
++        .field("alignment", "au")
++        .field("codec_data", gst::Buffer::from_slice([5, 6, 7, 8]))
++        .build();
++
++    h.set_src_caps(low_caps);
++    h.play();
++
++    // Push 3 low-res frames (~6 fps = 167ms spacing, no duration) so the first chunk drains.
++    for (i, pts_ms) in [0u64, 167, 334].into_iter().enumerate() {
++        let mut buf = gst::Buffer::with_size(4).unwrap();
++        {
++            let buf = buf.get_mut().unwrap();
++            buf.set_pts(pts_ms.mseconds());
++            buf.set_dts(pts_ms.mseconds());
++            if i > 0 {
++                buf.set_flags(gst::BufferFlags::DELTA_UNIT);
++            }
++        }
++        assert_eq!(h.push(buf), Ok(gst::FlowSuccess::Ok));
++    }
++
++    // Wait for initial header + first chunk to be emitted before changing caps.
++    let first_buf = h.pull().unwrap();
++    let base_pts = first_buf.pts().unwrap();
++    let mut pre_pts = drain_media_buffers(&mut h);
++
++    // Caps change drains the pre-transition GOP (fragment_start_pts = chunk_start_pts = 334ms,
++    // fragment_end_pts = 2334ms).
++    h.set_src_caps(high_caps);
++
++    // Post-transition high-res frames start at 1183ms (> 334ms + 100ms chunk_duration,
++    // still < 2334ms fragment_end_pts) and span 550ms (> 5 chunk durations).
++    for i in 0..12u64 {
++        let pts = (1183 + i * 50).mseconds();
++        let mut buf = gst::Buffer::with_size(4).unwrap();
++        {
++            let buf = buf.get_mut().unwrap();
++            buf.set_pts(pts);
++            buf.set_dts(pts);
++            if i > 0 {
++                buf.set_flags(gst::BufferFlags::DELTA_UNIT);
++            }
++        }
++        assert_eq!(h.push(buf), Ok(gst::FlowSuccess::Ok));
++    }
++
++    // Wait briefly for aggregator thread to finish draining what was already pushed.
++    std::thread::sleep(std::time::Duration::from_millis(50));
++    let mut all_pts = drain_media_buffers(&mut h);
++    let post_before_eos = all_pts
++        .iter()
++        .filter(|&&pts| pts >= base_pts + 1183.mseconds())
++        .count();
++    assert!(
++        post_before_eos > 0,
++        "Expected post-transition chunks to be emitted before EOS/fragment_end (got 0)"
++    );
++
++    h.push_event(gst::event::Eos::new());
++    while h.pull_event().unwrap().type_() != gst::EventType::Eos {}
++    all_pts.extend(drain_media_buffers(&mut h));
++    pre_pts.extend(all_pts);
++
++    let post_total = pre_pts
++        .iter()
++        .filter(|&&pts| pts >= base_pts + 1183.mseconds())
++        .count();
++    assert_eq!(post_total, 12);
++    assert_eq!(pre_pts.len(), 3 + 12);
++}
++
++#[test]
++fn test_caps_change_gap_exceeding_fragment_duration_chunked() {
++    init();
++
++    let mut h = gst_check::Harness::with_padnames("isofmp4mux", Some("sink_0"), Some("src"));
++
++    h.element()
++        .unwrap()
++        .set_property_from_str("header-update-mode", "caps");
++    h.element()
++        .unwrap()
++        .set_property("fragment-duration", 2.seconds());
++    h.element()
++        .unwrap()
++        .set_property("chunk-duration", 100.mseconds());
++
++    let high_caps = gst::Caps::builder("video/x-h264")
++        .field("width", 2880i32)
++        .field("height", 1620i32)
++        .field("framerate", gst::Fraction::new(20, 1))
++        .field("stream-format", "avc")
++        .field("alignment", "au")
++        .field("codec_data", gst::Buffer::from_slice([5, 6, 7, 8]))
++        .build();
++
++    let low_caps = gst::Caps::builder("video/x-h264")
++        .field("width", 1280i32)
++        .field("height", 720i32)
++        .field("framerate", gst::Fraction::new(6, 1))
++        .field("stream-format", "avc")
++        .field("alignment", "au")
++        .field("codec_data", gst::Buffer::from_slice([1, 2, 3, 4]))
++        .build();
++
++    h.set_src_caps(high_caps);
++    h.play();
++
++    for i in 0..5u64 {
++        let pts = (i * 50).mseconds();
++        let mut buf = gst::Buffer::with_size(4).unwrap();
++        {
++            let buf = buf.get_mut().unwrap();
++            buf.set_pts(pts);
++            buf.set_dts(pts);
++            if i > 0 {
++                buf.set_flags(gst::BufferFlags::DELTA_UNIT);
++            }
++        }
++        assert_eq!(h.push(buf), Ok(gst::FlowSuccess::Ok));
++    }
++
++    // Wait for initial header + chunk so streams are created before caps change.
++    let first_buf = h.pull().unwrap();
++    let base_pts = first_buf.pts().unwrap();
++    let mut pre_pts = drain_media_buffers(&mut h);
++
++    // Caps change drains pre-transition GOP ending at 200ms (fragment_end_pts = 2200ms).
++    h.set_src_caps(low_caps);
++
++    // Post-transition frames start at 3174ms (> fragment_end_pts = 2200ms, 2.974s gap)
++    // and continue for 4 seconds.
++    for i in 0..25u64 {
++        let pts = (3174 + i * 167).mseconds();
++        let mut buf = gst::Buffer::with_size(4).unwrap();
++        {
++            let buf = buf.get_mut().unwrap();
++            buf.set_pts(pts);
++            buf.set_dts(pts);
++            if i % 6 != 0 {
++                buf.set_flags(gst::BufferFlags::DELTA_UNIT);
++            }
++        }
++        assert_eq!(h.push(buf), Ok(gst::FlowSuccess::Ok));
++    }
++
++    std::thread::sleep(std::time::Duration::from_millis(50));
++    let mut all_pts = drain_media_buffers(&mut h);
++    let post_before_eos = all_pts
++        .iter()
++        .filter(|&&pts| pts >= base_pts + 3174.mseconds())
++        .count();
++    assert!(
++        post_before_eos > 0,
++        "Mux stalled after caps change with gap exceeding fragment_duration (got 0)"
++    );
++
++    h.push_event(gst::event::Eos::new());
++    while h.pull_event().unwrap().type_() != gst::EventType::Eos {}
++    all_pts.extend(drain_media_buffers(&mut h));
++    pre_pts.extend(all_pts);
++
++    let post_total = pre_pts
++        .iter()
++        .filter(|&&pts| pts >= base_pts + 3174.mseconds())
++        .count();
++    assert_eq!(post_total, 25);
++    assert_eq!(pre_pts.len(), 5 + 25);
++}
++
++#[test]
++fn test_single_stream_gap_exceeding_fragment_duration_chunked() {
++    init();
++
++    let mut h = gst_check::Harness::with_padnames("isofmp4mux", Some("sink_0"), Some("src"));
++
++    h.element()
++        .unwrap()
++        .set_property("fragment-duration", 2.seconds());
++    h.element()
++        .unwrap()
++        .set_property("chunk-duration", 100.mseconds());
++
++    let caps = gst::Caps::builder("video/x-h264")
++        .field("width", 1920i32)
++        .field("height", 1080i32)
++        .field("framerate", gst::Fraction::new(20, 1))
++        .field("stream-format", "avc")
++        .field("alignment", "au")
++        .field("codec_data", gst::Buffer::from_slice([1, 2, 3, 4]))
++        .build();
++
++    h.set_src_caps(caps);
++    h.play();
++
++    // First GOP: 0..300ms (with explicit duration so end_pts is 350ms).
++    for i in 0..7u64 {
++        let pts = (i * 50).mseconds();
++        let mut buf = gst::Buffer::with_size(4).unwrap();
++        {
++            let buf = buf.get_mut().unwrap();
++            buf.set_pts(pts);
++            buf.set_dts(pts);
++            buf.set_duration(50.mseconds());
++            if i > 0 {
++                buf.set_flags(gst::BufferFlags::DELTA_UNIT);
++            }
++        }
++        assert_eq!(h.push(buf), Ok(gst::FlowSuccess::Ok));
++    }
++
++    let first_buf = h.pull().unwrap();
++    let base_pts = first_buf.pts().unwrap();
++    let mut pre_pts = drain_media_buffers(&mut h);
++
++    // Timestamp gap jumping past fragment_end_pts (2000ms) to 3000ms.
++    for i in 0..20u64 {
++        let pts = (3000 + i * 50).mseconds();
++        let mut buf = gst::Buffer::with_size(4).unwrap();
++        {
++            let buf = buf.get_mut().unwrap();
++            buf.set_pts(pts);
++            buf.set_dts(pts);
++            buf.set_duration(50.mseconds());
++            if i > 0 {
++                buf.set_flags(gst::BufferFlags::DELTA_UNIT);
++            }
++        }
++        assert_eq!(h.push(buf), Ok(gst::FlowSuccess::Ok));
++    }
++
++    std::thread::sleep(std::time::Duration::from_millis(50));
++    let mut all_pts = drain_media_buffers(&mut h);
++    let post_before_eos = all_pts
++        .iter()
++        .filter(|&&pts| pts >= base_pts + 3000.mseconds())
++        .count();
++    assert!(
++        post_before_eos > 0,
++        "Mux stalled after timestamp gap exceeding fragment_duration (got 0)"
++    );
++
++    h.push_event(gst::event::Eos::new());
++    while h.pull_event().unwrap().type_() != gst::EventType::Eos {}
++    all_pts.extend(drain_media_buffers(&mut h));
++    pre_pts.extend(all_pts);
++
++    let post_total = pre_pts
++        .iter()
++        .filter(|&&pts| pts >= base_pts + 3000.mseconds())
++        .count();
++    assert_eq!(post_total, 20);
++    assert_eq!(pre_pts.len(), 7 + 20);
++}
++
++#[test]
++fn test_multi_stream_video_gap_continuous_audio_chunked() {
++    init();
++
++    let mut hv = gst_check::Harness::with_padnames("isofmp4mux", Some("sink_0"), Some("src"));
++    let mut ha = gst_check::Harness::with_element(&hv.element().unwrap(), Some("sink_1"), None);
++
++    hv.element()
++        .unwrap()
++        .set_property("fragment-duration", 2.seconds());
++    hv.element()
++        .unwrap()
++        .set_property("chunk-duration", 100.mseconds());
++
++    hv.set_src_caps(
++        gst::Caps::builder("video/x-h264")
++            .field("width", 1920i32)
++            .field("height", 1080i32)
++            .field("framerate", gst::Fraction::new(20, 1))
++            .field("stream-format", "avc")
++            .field("alignment", "au")
++            .field("codec_data", gst::Buffer::from_slice([1, 2, 3, 4]))
++            .build(),
++    );
++    ha.set_src_caps(
++        gst::Caps::builder("audio/mpeg")
++            .field("mpegversion", 4i32)
++            .field("channels", 1i32)
++            .field("rate", 48000i32)
++            .field("stream-format", "raw")
++            .field("base-profile", "lc")
++            .field("profile", "lc")
++            .field("level", "2")
++            .field("codec_data", gst::Buffer::from_slice([0x11, 0x88]))
++            .build(),
++    );
++    hv.play();
++    ha.play();
++
++    // Push interleaved video (0..300ms, then gap to 3000..4000ms) and continuous audio (0..4000ms)
++    // from separate threads so GstAggregator does not block audio while waiting for video's next buffer.
++    let audio_handle = std::thread::spawn(move || {
++        for step in 0..80u64 {
++            let pts = (step * 50).mseconds();
++            let mut abuf = gst::Buffer::with_size(3).unwrap();
++            {
++                let abuf = abuf.get_mut().unwrap();
++                abuf.set_pts(pts);
++                abuf.set_duration(50.mseconds());
++            }
++            assert_eq!(ha.push(abuf), Ok(gst::FlowSuccess::Ok));
++        }
++        ha.push_event(gst::event::Eos::new());
++        ha
++    });
++
++    let mut video_count = 0usize;
++    for step in 0..80u64 {
++        if step < 7 || step >= 60 {
++            let pts = (step * 50).mseconds();
++            let mut vbuf = gst::Buffer::with_size(4).unwrap();
++            {
++                let vbuf = vbuf.get_mut().unwrap();
++                vbuf.set_pts(pts);
++                vbuf.set_dts(pts);
++                vbuf.set_duration(50.mseconds());
++                if step != 0 && step != 60 {
++                    vbuf.set_flags(gst::BufferFlags::DELTA_UNIT);
++                }
++            }
++            assert_eq!(hv.push(vbuf), Ok(gst::FlowSuccess::Ok));
++            video_count += 1;
++        }
++    }
++
++    hv.push_event(gst::event::Eos::new());
++    let _ha = audio_handle.join().unwrap();
++    while hv.pull_event().unwrap().type_() != gst::EventType::Eos {}
++
++    let mut out_video = 0usize;
++    let mut out_audio = 0usize;
++    while hv.buffers_in_queue() > 0 {
++        let buf = hv.pull().unwrap();
++        if buf.size() == 4 {
++            out_video += 1;
++        } else if buf.size() == 3 {
++            out_audio += 1;
++        }
++    }
++    assert_eq!(out_video, video_count);
++    assert_eq!(out_audio, 80);
++}
+-- 
+2.50.1 (Apple Git-155)
+
