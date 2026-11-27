@@ -1910,6 +1910,13 @@ gst_h264_parse_sps_data (NalReader * nr, GstH264SPS * sps)
   memset (sps->scaling_lists_8x8, 16, 384);
 
   READ_UINT8 (nr, sps->profile_idc, 8);
+  /* Profile zero is reserved, not an implicit Baseline profile. Camera
+   * metadata recovered at a false start code can otherwise overwrite a
+   * valid SPS. Leave other profile handling unchanged. */
+  if (sps->profile_idc == 0) {
+    GST_WARNING ("Invalid SPS profile_idc zero");
+    goto error;
+  }
   READ_UINT8 (nr, sps->constraint_set0_flag, 1);
   READ_UINT8 (nr, sps->constraint_set1_flag, 1);
   READ_UINT8 (nr, sps->constraint_set2_flag, 1);
